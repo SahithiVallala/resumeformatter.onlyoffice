@@ -1,11 +1,29 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import './ResumeUploadPhase.css';
+import { getCaiContact, saveCaiContact } from '../services/api';
 
 const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBack, isFormatting, setIsFormatting }) => {
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [caiContact, setCaiContact] = useState({ name: '', phone: '', email: '' });
+  const [showCaiEditor, setShowCaiEditor] = useState(false);
+  const [savingCai, setSavingCai] = useState(false);
 
   const selectedTemplateData = templates.find(t => t.id === selectedTemplate);
+
+  // Load stored CAI contact on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await getCaiContact();
+        if (res?.success && res?.contact) {
+          setCaiContact(res.contact);
+        }
+      } catch (e) {
+        // silent
+      }
+    })();
+  }, []);
 
   const handleFileSelect = (e) => {
     const selectedFiles = Array.from(e.target.files);
@@ -64,8 +82,40 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
     }
   };
 
+  const handleOpenCai = () => setShowCaiEditor(true);
+  const handleCloseCai = () => setShowCaiEditor(false);
+  const handleChangeCai = (e) => {
+    const { name, value } = e.target;
+    setCaiContact(prev => ({ ...prev, [name]: value }));
+  };
+  const handleSaveCai = async () => {
+    setSavingCai(true);
+    try {
+      const res = await saveCaiContact(caiContact);
+      if (!res?.success) throw new Error('Save failed');
+      setCaiContact(res.contact || caiContact);
+      setShowCaiEditor(false);
+    } catch (e) {
+      alert('Failed to save CAI Contact');
+    } finally {
+      setSavingCai(false);
+    }
+  };
+
   return (
     <div className="resume-upload-phase">
+      {/* CAI Contact header card */}
+      <div className="cai-contact-card">
+        <div className="cai-left">
+          <div className="cai-heading">CAI Contact</div>
+          <div className="cai-name">{caiContact.name || '—'}</div>
+          <div className="cai-line">Phone: {caiContact.phone || '—'}</div>
+          <div className="cai-line">Email: {caiContact.email || '—'}</div>
+        </div>
+        <div className="cai-right">
+          <button className="edit-cai-btn" onClick={handleOpenCai}>Edit CAI Contact</button>
+        </div>
+      </div>
       <div className="phase-header">
         <h2>📤 Upload Candidate Resumes</h2>
         <p>Drop your resume files here or click to browse</p>
@@ -154,8 +204,36 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
           )}
         </button>
       </div>
+
+      {showCaiEditor && (
+        <div className="modal-overlay" onClick={handleCloseCai}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">Edit CAI Contact</div>
+            <div className="modal-body">
+              <div className="form-row">
+                <label>Name</label>
+                <input name="name" value={caiContact.name} onChange={handleChangeCai} placeholder="Full name" />
+              </div>
+              <div className="form-row">
+                <label>Phone</label>
+                <input name="phone" value={caiContact.phone} onChange={handleChangeCai} placeholder="Phone number" />
+              </div>
+              <div className="form-row">
+                <label>Email</label>
+                <input name="email" value={caiContact.email} onChange={handleChangeCai} placeholder="name@cai.io" />
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn-secondary" onClick={handleCloseCai} disabled={savingCai}>Cancel</button>
+              <button className="btn-primary" onClick={handleSaveCai} disabled={savingCai}>
+                {savingCai ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-};
+}
 
 export default ResumeUploadPhase;

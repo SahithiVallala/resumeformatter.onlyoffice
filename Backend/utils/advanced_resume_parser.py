@@ -235,38 +235,54 @@ class ResumeParser:
         experiences = []
         section = self._find_section(['experience', 'work history', 'employment', 'professional experience'])
         if not section:
+            print("  ⚠️  No experience section found")
             return experiences
+        
+        print(f"  📋 Found experience section with {len(section)} lines")
 
-        # Normalize lines
-        lines = [self._normalize_text(l) for l in section if l and l.strip()]
+        # Normalize lines and strip bullets
+        lines = [self._strip_bullet(self._normalize_text(l)) for l in section if l and l.strip()]
+        
+        print(f"  📝 First 10 lines of experience section:")
+        for idx, l in enumerate(lines[:10]):
+            print(f"     {idx}: {l[:80]}")
+        
         i = 0
         while i < len(lines):
             line = lines[i]
+            
+            # Skip very short or empty lines
+            if len(line) < 3:
+                i += 1
+                continue
 
-            # Case A: Date line followed by role/company line
+            # Case A: Line with dates (role + dates, company on next line)
             if self._contains_date_range(line):
                 duration = self._clean_years(line)
-                # Find next descriptive line for role/company
+                
+                # Extract role by removing dates from current line
+                role = self._extract_role_from_dated_line(line)
+                
+                # Next non-empty line should be company name
                 j = i + 1
-                while j < len(lines) and (not lines[j] or self._is_section_header(lines[j])):
+                while j < len(lines) and len(lines[j].strip()) < 3:
                     j += 1
-                title_line = lines[j] if j < len(lines) else ''
-                # Prefer company from the next line (strip bullet/location)
-                company_line = self._strip_bullet(title_line)
-                company, role = self._parse_company_role_line(company_line)
-                # If parsing by delimiter failed, treat next line as company and role from date line
-                if not company and company_line:
+                
+                company = ''
+                if j < len(lines) and not self._is_section_header(lines[j]):
+                    company_line = lines[j]
+                    # Remove location info (City, State, etc.)
                     company = self._strip_location(company_line)
-                # Derive role from the dated line by removing dates/tokens
-                role_from_date = self._extract_role_from_dated_line(line)
-                if role_from_date:
-                    role = role_from_date
-                company, role = self._strip_location(company), self._strip_location(role)
+                    # Clean up any trailing dashes/separators
+                    company = re.sub(r'\s*[–—-]\s*$', '', company).strip()
+                
+                role = role.strip()
+                company = company.strip()
 
                 exp = {
                     'company': company,
                     'role': role,
-                    'title': title_line,
+                    'title': f"{role} - {company}",
                     'duration': duration,
                     'details': []
                 }
@@ -274,11 +290,15 @@ class ResumeParser:
                 # Collect following detail bullets until next date or header
                 k = j + 1
                 while k < len(lines):
-                    if self._contains_date_range(lines[k]) or self._looks_like_company_or_role(lines[k]) or self._is_section_header(lines[k]):
+                    if self._contains_date_range(lines[k]) or self._is_section_header(lines[k]):
                         break
-                    exp['details'].append(lines[k])
+                    detail = lines[k].strip()
+                    if detail and len(detail) > 10:  # Skip very short lines
+                        exp['details'].append(detail)
                     k += 1
+                
                 experiences.append(exp)
+                print(f"    ✓ Entry {len(experiences)}: {company or '(no company)'} - {role or '(no role)'} ({duration}) [{len(exp['details'])} details]")
                 i = k
                 continue
 
@@ -307,11 +327,13 @@ class ResumeParser:
                     exp['details'].append(lines[k])
                     k += 1
                 experiences.append(exp)
+                print(f"    ✓ Parsed experience: {company} - {role} ({duration})")
                 i = k
                 continue
 
             i += 1
-
+        
+        print(f"  ✅ Total experiences extracted: {len(experiences)}")
         return experiences
     
     def _parse_company_role_line(self, line):
@@ -367,45 +389,89 @@ class ResumeParser:
         return line.strip(), ''
     
     def _extract_education(self):
-        """Extract education with pairing: degree line (with colon/institution) + year next line."""
+        """Extract education - combine degree + institution properly.
+        Enhanced to detect High School and similar qualifications and to clean degree text.
+        """
         education = []
         section = self._find_section(['education', 'academic', 'qualification'])
         if not section:
+            print("  ⚠️  No education section found")
             return education
+        
+        print(f"  🎓 Found education section with {len(section)} lines")
 
         lines = [self._normalize_text(l) for l in section if l and l.strip()]
         i = 0
         while i < len(lines):
-            line = lines[i]
+            line = self._strip_bullet(lines[i])
+            
+            # Skip empty or very short lines
+            if len(line) < 5:
+                i += 1
+                continue
 
-            # Degree line typically contains ':' and an institution keyword on same line
-            if ':' in line or any(k in line.lower() for k in ['university', 'college', 'school', 'institute', 'academy']):
+            # Check if this line contains degree keywords
+            degree_keywords = [
+                'bachelor', 'master', 'phd', 'mba', 'bsc', 'msc', 'b.sc', 'm.sc', 'degree', 'diploma',
+                'high school', 'secondary school', 'higher secondary', 'matriculation', 'ssc', 'hsc', 'ged'
+            ]
+            has_degree = any(kw in line.lower() for kw in degree_keywords)
+            has_institution = any(k in line.lower() for k in ['university', 'college', 'school', 'institute', 'academy'])
+            
+            # Only process if it looks like a degree line
+            if has_degree or (has_institution and ':' in line):
                 degree, institution = self._parse_degree_institution_line(line)
-                degree = degree.strip()
-                institution = self._strip_location(institution)
+                year = self._clean_years(line)
 
-                # year can be on next line
-                year = ''
+                # Clean year tokens and generic suffixes from degree text
+                if degree:
+                    degree = re.sub(r'\b(?:19|20)\d{2}\b', '', degree)
+                    degree = re.sub(r'\b(class of|graduation|graduated|passed out)\b', '', degree, flags=re.IGNORECASE)
+                    degree = re.sub(r'\s+', ' ', degree).strip(' ,.;:-')
+                
+                # If institution is empty, check next line
+                if not institution and i + 1 < len(lines):
+                    next_line = self._strip_bullet(lines[i + 1])
+                    if any(k in next_line.lower() for k in ['university', 'college', 'school', 'institute', 'academy']):
+                        institution = self._strip_location(next_line).strip()
+                        # Also get year from next line if not already found
+                        if not year:
+                            year = self._clean_years(next_line)
+                        i += 1  # Skip the institution line
+                
+                # Collect details (but skip lines that look like other education entries)
+                details = []
                 j = i + 1
-                if j < len(lines) and self._contains_date_range(lines[j]):
-                    year = self._clean_years(lines[j])
-                    i = j + 1
-                else:
-                    # Try to find years on same line
-                    year = self._clean_years(line)
-                    i += 1
-
-                edu = {
-                    'degree': degree,
-                    'institution': institution,
-                    'year': year,
-                    'details': []
-                }
-                education.append(edu)
+                while j < len(lines) and j < i + 4:
+                    detail_line = self._strip_bullet(lines[j])
+                    # Stop if we hit another degree entry
+                    if any(kw in detail_line.lower() for kw in degree_keywords):
+                        break
+                    if self._is_section_header(detail_line):
+                        break
+                    # Add as detail if substantial and not an institution-only line
+                    is_institution_only = any(k in detail_line.lower() for k in ['university', 'college', 'school']) and len(detail_line.split()) < 6
+                    if len(detail_line) > 15 and not is_institution_only:
+                        details.append(detail_line)
+                    j += 1
+                
+                # Only add if we have at least a degree or institution
+                if degree or institution:
+                    edu = {
+                        'degree': degree.strip(),
+                        'institution': institution.strip(),
+                        'year': year,
+                        'details': details
+                    }
+                    education.append(edu)
+                    print(f"    ✓ Parsed edu: {degree or '(no degree)'} - {institution or '(no inst)'} ({year})")
+                
+                i = j
                 continue
 
             i += 1
-
+        
+        print(f"  ✅ Total education entries extracted: {len(education)}")
         return education
 
     # ---------------------- Helpers ----------------------
@@ -413,7 +479,13 @@ class ResumeParser:
         # Remove odd unicode like 'ï¼' and zero-width, collapse spaces
         if not s:
             return ''
-        s = s.replace('\u200b', ' ').replace('ï¼', ' ').replace('\ufeff', ' ')
+        # Remove zero-width and BOM characters
+        s = s.replace('\u200b', ' ').replace('\ufeff', ' ')
+        # Remove common garbage unicode
+        s = s.replace('ï¼', ' ').replace('â€"', '-').replace('–', '-').replace('—', '-')
+        # Normalize quotes and apostrophes
+        s = s.replace(''', "'").replace(''', "'").replace('"', '"').replace('"', '"')
+        # Collapse multiple spaces
         s = re.sub(r'\s+', ' ', s).strip()
         return s
 
@@ -425,11 +497,49 @@ class ResumeParser:
         return s.strip()
 
     def _clean_years(self, s):
+        """Normalize date ranges.
+        Prefer 'Mon YYYY-Mon YYYY' if months present; else 'YYYY-YYYY' or 'YYYY'.
+        """
         if not s:
             return ''
         s = self._normalize_text(s)
+        s = re.sub(r'[–—]', '-', s)
         s = re.sub(r'\s*(to|–|—|-)\s*', '-', s, flags=re.IGNORECASE)
-        s = re.sub(r'\b(current|present)\b', str(datetime.now().year), s, flags=re.IGNORECASE)
+
+        present = bool(re.search(r'\b(current|present)\b', s, re.IGNORECASE))
+
+        month_map = {
+            'january': 'Jan', 'jan': 'Jan',
+            'february': 'Feb', 'feb': 'Feb',
+            'march': 'Mar', 'mar': 'Mar',
+            'april': 'Apr', 'apr': 'Apr',
+            'may': 'May',
+            'june': 'Jun', 'jun': 'Jun',
+            'july': 'Jul', 'jul': 'Jul',
+            'august': 'Aug', 'aug': 'Aug',
+            'september': 'Sept', 'sept': 'Sept', 'sep': 'Sept',
+            'october': 'Oct', 'oct': 'Oct',
+            'november': 'Nov', 'nov': 'Nov',
+            'december': 'Dec', 'dec': 'Dec',
+        }
+        def abbr(m):
+            return month_map.get(m.lower(), m[:3].title())
+
+        my = [m.groups() for m in re.finditer(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*(?:,\s*)?((?:19|20)\d{2})\b', s, flags=re.IGNORECASE)]
+        if my:
+            sm, sy = my[0]
+            sm = abbr(sm)
+            if len(my) >= 2:
+                em, ey = my[-1]
+                em = abbr(em)
+                return f"{sm} {sy}-{em} {ey}"
+            if present:
+                return f"{sm} {sy}-Present"
+            yrs = re.findall(r'\b((?:19|20)\d{2})\b', s)
+            if len(yrs) >= 2:
+                return f"{sm} {yrs[0]}-{yrs[-1]}"
+            return f"{sm} {sy}"
+
         years = re.findall(r'\b(?:19|20)\d{2}\b', s)
         if len(years) >= 2:
             return f"{years[0]}-{years[-1]}"

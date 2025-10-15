@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import traceback
+import json
 
 # Try to import win32com for .doc support
 try:
@@ -119,6 +120,12 @@ class WordFormatter:
         doc = Document(self.template_path)
         
         print(f"✓ Template loaded: {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables")
+        
+        # Ensure CAI CONTACT section is inserted with persistent data
+        try:
+            self._ensure_cai_contact(doc)
+        except Exception as e:
+            print(f"⚠️  CAI Contact insertion error: {e}")
         
         # Show what data we have from resume
         print(f"\n📊 Resume Data Available:")
@@ -291,6 +298,149 @@ class WordFormatter:
             # Fallback: append to document if direct insert fails
             return paragraph._parent.add_paragraph(text)
     
+    def _add_right_tab(self, paragraph, pos_twips=9360):
+        """Add a right-aligned tab stop to a paragraph at the given twips position (1 inch = 1440 twips)."""
+        try:
+            pPr = paragraph._p.get_or_add_pPr()
+            tabs = pPr.find(qn('w:tabs'))
+            if tabs is None:
+                tabs = OxmlElement('w:tabs')
+                pPr.append(tabs)
+            tab = OxmlElement('w:tab')
+            tab.set(qn('w:val'), 'right')
+            tab.set(qn('w:pos'), str(pos_twips))
+            tabs.append(tab)
+        except Exception:
+            # If this fails, the text will still render; right text just won't align via tab stop
+            pass
+
+    # ===== CAI CONTACT PERSISTENCE AND INSERTION =====
+    def _cai_store_path(self):
+        """Return a stable file path to store CAI contact details."""
+        home = os.path.expanduser("~")
+        return os.path.join(home, ".resume_formatter_cai_contact.json")
+
+    def _load_cai_contact(self, proposed=None, edit=False):
+        """Load CAI contact from disk. If edit=True and proposed provided, overwrite and save.
+        Structure: {"name": str, "phone": str, "email": str}
+        """
+        path = self._cai_store_path()
+        stored = {}
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    stored = json.load(f) or {}
+        except Exception:
+            stored = {}
+
+        if edit and isinstance(proposed, dict) and any(proposed.get(k) for k in ("name", "phone", "email")):
+            data = {
+                "name": (proposed.get("name") or stored.get("name") or ""),
+                "phone": (proposed.get("phone") or stored.get("phone") or ""),
+                "email": (proposed.get("email") or stored.get("email") or ""),
+            }
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            return data
+
+        # No edit: fall back to stored, else proposed, else empty
+        if stored:
+            return stored
+        if isinstance(proposed, dict):
+            return {
+                "name": proposed.get("name", ""),
+                "phone": proposed.get("phone", ""),
+                "email": proposed.get("email", ""),
+            }
+        return {"name": "", "phone": "", "email": ""}
+
+    def _ensure_cai_contact(self, doc):
+        """Ensure the CAI CONTACT section exists and is filled from persistent storage.
+        Will not change stored values unless an explicit edit flag is provided via
+        resume_data['edit_cai_contact'] or template_analysis['edit_cai_contact'].
+        """
+        edit_flag = bool(self.resume_data.get('edit_cai_contact') or (self.template_analysis or {}).get('edit_cai_contact'))
+        proposed = self.resume_data.get('cai_contact', {})
+        cai = self._load_cai_contact(proposed=proposed, edit=edit_flag)
+
+        # Find existing CAI CONTACT heading
+        heading_idx = None
+        for idx, p in enumerate(doc.paragraphs):
+            if (p.text or '').strip().upper() == 'CAI CONTACT':
+                heading_idx = idx
+                break
+
+        if heading_idx is None:
+            # Insert near the top: after the first paragraph
+            anchor = doc.paragraphs[0] if doc.paragraphs else doc.add_paragraph("")
+            heading = self._insert_paragraph_after(anchor, 'CAI CONTACT')
+            if heading is None:
+                heading = doc.add_paragraph('CAI CONTACT')
+            for r in heading.runs:
+                r.bold = True
+                r.font.size = Pt(11)
+            # Write lines under heading
+            self._write_cai_contact_block(heading, cai)
+        else:
+            heading = doc.paragraphs[heading_idx]
+            # Clear the next few contact lines (up to 5) if they look like contact lines
+            to_clear = []
+            for j in range(1, 6):
+                k = heading_idx + j
+                if k >= len(doc.paragraphs):
+                    break
+                txt = (doc.paragraphs[k].text or '').strip()
+                if not txt:
+                    to_clear.append(doc.paragraphs[k])
+                    continue
+                upper = txt.upper()
+                if any(kw in upper for kw in ['SUMMARY', 'EMPLOYMENT HISTORY', 'WORK EXPERIENCE', 'EDUCATION']):
+                    break
+                if ('PHONE:' in upper) or ('EMAIL' in upper) or ('@' in txt) or (len(txt.split())<=4):
+                    to_clear.append(doc.paragraphs[k])
+                else:
+                    break
+            for para in to_clear:
+                try:
+                    for r in para.runs:
+                        r.text = ''
+                    para.text = ''
+                except Exception:
+                    pass
+            # Ensure heading styling
+            for r in heading.runs:
+                r.bold = True
+                r.font.size = Pt(11)
+            # Write fresh block after heading
+            self._write_cai_contact_block(heading, cai)
+
+    def _write_cai_contact_block(self, heading_para, cai):
+        """Write CAI contact lines under the given heading paragraph."""
+        name = (cai.get('name') or '').strip()
+        phone = (cai.get('phone') or '').strip()
+        email = (cai.get('email') or '').strip()
+
+        p_name = self._insert_paragraph_after(heading_para, name or '')
+        if p_name is not None:
+            for r in p_name.runs:
+                r.bold = True
+                r.font.size = Pt(10)
+
+        if phone:
+            p_phone = self._insert_paragraph_after(p_name or heading_para, f"Phone:  {phone}")
+            if p_phone is not None:
+                for r in p_phone.runs:
+                    r.font.size = Pt(10)
+
+        if email:
+            p_email = self._insert_paragraph_after(p_phone or p_name or heading_para, f"Email:  {email}")
+            if p_email is not None:
+                for r in p_email.runs:
+                    r.font.size = Pt(10)
+    
     def _insert_experience_block(self, doc, after_paragraph, exp_data):
         """Insert a structured 2-column experience block"""
         try:
@@ -305,66 +455,65 @@ class WordFormatter:
                 title = exp_data.get('title', '')
                 company, role = self._parse_company_role(title)
             
+            # CRITICAL: Remove date fragments from company/role
+            # Sometimes dates like "City – 08/ 06/" end up in company field
+            import re
+            if company:
+                # Remove patterns like "City – 08/ 06/" or "– 04/" etc
+                company = re.sub(r'\s*[–-]\s*\d{2}/\s*\d{2}/?\s*.*?$', '', company)
+                company = re.sub(r'\s*City\s*[–-]\s*\d{2}/.*?$', '', company)
+                company = company.strip(' ,–-')
+            
+            if role:
+                role = re.sub(r'\s*[–-]\s*\d{2}/\s*\d{2}/?/\s*.*?$', '', role)
+                role = re.sub(r'\s*City\s*[–-]\s*\d{2}/.*?$', '', role)
+                role = role.strip(' ,–-')
+            
             # Clean up duration format
             duration_clean = self._clean_duration(duration)
             
-            # Create 2-column table (no borders) - insert after the heading paragraph
-            table = self._insert_table_after(doc, after_paragraph, rows=1, cols=2)
-            if not table:
-                return False
-            
-            # Set column widths (70% left, 30% right)
-            table.columns[0].width = Inches(4.7)
-            table.columns[1].width = Inches(1.8)
-            
-            # Remove borders
-            for row in table.rows:
-                for cell in row.cells:
-                    self._remove_cell_borders(cell)
-            
-            # Left cell: COMPANY – ROLE (all uppercase, bold)
-            left_cell = table.rows[0].cells[0]
-            left_para = left_cell.paragraphs[0]
-            
-            # Format: COMPANY – ROLE
-            if company and role:
-                text = f"{company.upper()} – {role.upper()}"
-            elif company:
-                text = company.upper()
-            elif role:
-                text = role.upper()
-            else:
-                text = title.upper()
-            
-            left_run = left_para.add_run(text)
+            # Build header line using a right-aligned tab instead of a table
+            header_para = self._insert_paragraph_after(after_paragraph, '')
+            # Right tab at ~6.5" (letter page width minus 1" margins), 1 inch = 1440 twips
+            self._add_right_tab(header_para, pos_twips=9360)
+
+            # Left text: prefer company, then role, then fallback
+            left_text = (company or role or 'Experience').strip()
+            left_run = header_para.add_run(left_text)
             left_run.bold = True
-            left_run.font.size = Pt(11)
+            left_run.font.size = Pt(10)
+
+            if duration_clean:
+                header_para.add_run('\t')
+                dur_run = header_para.add_run(duration_clean)
+                dur_run.bold = False
+                dur_run.font.size = Pt(9)
+            header_para.paragraph_format.space_after = Pt(0)
+
+            # Role on its own line (bold)
+            last_para = header_para
+            if role:
+                role_para = self._insert_paragraph_after(header_para, '')
+                role_run = role_para.add_run(role)
+                role_run.bold = True
+                role_run.font.size = Pt(10)
+                role_para.paragraph_format.space_after = Pt(0)
+                last_para = role_para
+
+            # Add details as individual bullet paragraphs
+            if details:
+                opt_details = self._optimize_details(details, max_bullets=12, max_words=22, max_chars=160)
+                for detail in opt_details:
+                    txt = (detail or '').strip()
+                    if not txt:
+                        continue
+                    p = self._insert_paragraph_after(last_para, '')
+                    p.paragraph_format.left_indent = Inches(0.25)
+                    run = p.add_run('• ' + txt.lstrip('•–—-*● '))
+                    run.font.size = Pt(9)
+                    last_para = p
             
-            # Right cell: Duration (aligned right)
-            right_cell = table.rows[0].cells[1]
-            right_para = right_cell.paragraphs[0]
-            right_run = right_para.add_run(duration_clean)
-            right_run.font.size = Pt(10)
-            right_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            
-            # Add details below if any (in a new row or separate paragraph)
-            if details and len(details) > 0:
-                # Add a new row for details
-                detail_row = table.add_row()
-                detail_cell = detail_row.cells[0]
-                # Merge cells for full width
-                detail_cell.merge(detail_row.cells[1])
-                detail_para = detail_cell.paragraphs[0]
-                
-                # Add details as bullets
-                for detail in details[:6]:
-                    if detail.strip():
-                        detail_text = detail.strip()
-                        if not detail_text.startswith('•') and not detail_text.startswith('-'):
-                            detail_text = '   • ' + detail_text
-                        detail_para.add_run(detail_text + '\n')
-            
-            return table
+            return last_para
             
         except Exception as e:
             print(f"  ⚠️  Error inserting experience block: {e}")
@@ -381,6 +530,9 @@ class WordFormatter:
             year = edu_data.get('year', '')
             details = edu_data.get('details', [])
             
+            # DEBUG: Show what we received
+            print(f"      📚 Education data: degree='{degree[:50] if degree else ''}', institution='{institution[:30] if institution else ''}', year='{year}'")
+            
             # Fallback: if institution not parsed, try to extract from degree or details
             if not institution:
                 institution = self._extract_institution(degree, details)
@@ -388,60 +540,81 @@ class WordFormatter:
             # Clean up year format
             year_clean = self._clean_duration(year)
             
-            # Create 2-column table (no borders) - insert after the heading paragraph
-            table = self._insert_table_after(doc, after_paragraph, rows=1, cols=2)
-            if not table:
-                return None
+            # Build header line as paragraph with right-aligned tab (no tables)
+            header_para = self._insert_paragraph_after(after_paragraph, '')
+            self._add_right_tab(header_para, pos_twips=9360)
             
-            # Set column widths (70% left, 30% right)
-            table.columns[0].width = Inches(4.7)
-            table.columns[1].width = Inches(1.8)
+            # Parse degree to separate degree type from field
+            # Handle both formats:
+            # 1. "Master of Science : Leadership" (colon separator)
+            # 2. "Master of Science in Data Science" (in separator)
+            # 3. "Bachelor of Technology in Computer Science" (in separator)
             
-            # Remove borders
-            for row in table.rows:
-                for cell in row.cells:
-                    self._remove_cell_borders(cell)
+            degree_type = degree
+            field_and_institution = institution
+            field = ''
             
-            # Left cell: DEGREE  INSTITUTION (uppercase, bold)
-            left_cell = table.rows[0].cells[0]
-            left_para = left_cell.paragraphs[0]
+            if ':' in degree:
+                # Format: "Master of Science : Leadership"
+                parts = degree.split(':', 1)
+                degree_type = parts[0].strip()  # "Master of Science"
+                field = parts[1].strip() if len(parts) > 1 else ''  # "Leadership"
+                print(f"      ✂️  Split at colon: LEFT='{degree_type}' | Field='{field}'")
             
-            # Format: DEGREE  INSTITUTION
-            if degree and institution:
-                text = f"{degree.upper()}  {institution.upper()}"
-            elif degree:
-                text = degree.upper()
-            elif institution:
-                text = institution.upper()
+            elif ' in ' in degree.lower():
+                # Format: "Master of Science in Data Science"
+                # Find the position of " in " (case-insensitive)
+                lower_degree = degree.lower()
+                in_pos = lower_degree.find(' in ')
+                if in_pos > 0:
+                    degree_type = degree[:in_pos].strip()  # "Master of Science"
+                    field = degree[in_pos + 4:].strip()     # "Data Science"
+                    print(f"      ✂️  Split at 'in': LEFT='{degree_type}' | Field='{field}'")
+            
             else:
-                text = "EDUCATION"
+                print(f"      ℹ️  No split: Using full degree as LEFT='{degree_type}'")
             
-            left_run = left_para.add_run(text)
-            left_run.bold = True
-            left_run.font.size = Pt(11)
+            # Combine field with institution
+            if field and institution:
+                field_and_institution = f"{field} {institution}"
+            elif field:
+                field_and_institution = field
             
-            # Right cell: Year (aligned right)
-            right_cell = table.rows[0].cells[1]
-            right_para = right_cell.paragraphs[0]
-            right_run = right_para.add_run(year_clean)
-            right_run.font.size = Pt(10)
-            right_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            print(f"      📐 Format: LEFT='{degree_type}' | RIGHT='{field_and_institution} {year_clean}'")
             
-            # Add details below if any (in a new row)
-            if details and len(details) > 0:
-                # Add a new row for details
-                detail_row = table.add_row()
-                detail_cell = detail_row.cells[0]
-                # Merge cells for full width
-                detail_cell.merge(detail_row.cells[1])
-                detail_para = detail_cell.paragraphs[0]
-                
-                # Add details
-                for detail in details[:3]:
-                    if detail.strip() and detail.strip().lower() != institution.lower():
-                        detail_para.add_run('   - ' + detail.strip() + '\n')
+            # Degree type on the left (bold), year on the right
+            deg_run = header_para.add_run(degree_type or 'Education')
+            deg_run.bold = True
+            deg_run.font.size = Pt(10)
+            if year_clean:
+                header_para.add_run('\t')
+                yr_run = header_para.add_run(year_clean)
+                yr_run.bold = False
+                yr_run.font.size = Pt(9)
+            header_para.paragraph_format.space_after = Pt(0)
+
+            # Field + Institution on the next line (normal)
+            last_para = header_para
+            if field_and_institution:
+                fi_para = self._insert_paragraph_after(header_para, field_and_institution)
+                for run in fi_para.runs:
+                    run.font.size = Pt(10)
+                last_para = fi_para
+
+            # Add details as bullet paragraphs
+            if details:
+                opt_details = self._optimize_details(details, max_bullets=3, max_words=18, max_chars=120)
+                for detail in opt_details:
+                    txt = (detail or '').strip()
+                    if not txt or txt.lower() == (institution or '').lower():
+                        continue
+                    p = self._insert_paragraph_after(last_para, '')
+                    p.paragraph_format.left_indent = Inches(0.25)
+                    run = p.add_run('• ' + txt.lstrip('•–—-*● '))
+                    run.font.size = Pt(9)
+                    last_para = p
             
-            return table
+            return last_para
             
         except Exception as e:
             print(f"  ⚠️  Error inserting education block: {e}")
@@ -450,29 +623,66 @@ class WordFormatter:
             return None
     
     def _clean_duration(self, duration):
-        """Clean and format duration string to YYYY-YYYY (or single YYYY)"""
+        """Normalize duration.
+        Prefer 'Mon YYYY-Mon YYYY' (e.g., 'Nov 2011-Sept 2025').
+        Fallback to 'YYYY-YYYY' or single 'YYYY'.
+        """
         if not duration:
             return ''
 
-        duration = duration.strip()
+        t = (duration or '').strip()
+        if not t:
+            return ''
 
-        # Normalize common separators to '-'
-        duration = re.sub(r'\s*(to|–|—|-)\s*', '-', duration, flags=re.IGNORECASE)
+        # Normalize connectors
+        t = re.sub(r'[–—]', '-', t)
+        t = re.sub(r'\s*(to|–|—|-)\s*', '-', t, flags=re.IGNORECASE)
 
-        # Replace words with years
-        current_year = '2025'
-        duration = re.sub(r'\b(current|present)\b', current_year, duration, flags=re.IGNORECASE)
+        present = bool(re.search(r'\b(current|present)\b', t, re.IGNORECASE))
 
-        # Map months to years where patterns like 'Apr 2013' appear
-        # Extract full 4-digit years
-        years = re.findall(r'\b(?:19|20)\d{2}\b', duration)
+        # Month map with 'Sept' spelling
+        month_map = {
+            'january': 'Jan', 'jan': 'Jan',
+            'february': 'Feb', 'feb': 'Feb',
+            'march': 'Mar', 'mar': 'Mar',
+            'april': 'Apr', 'apr': 'Apr',
+            'may': 'May',
+            'june': 'Jun', 'jun': 'Jun',
+            'july': 'Jul', 'jul': 'Jul',
+            'august': 'Aug', 'aug': 'Aug',
+            'september': 'Sept', 'sept': 'Sept', 'sep': 'Sept',
+            'october': 'Oct', 'oct': 'Oct',
+            'november': 'Nov', 'nov': 'Nov',
+            'december': 'Dec', 'dec': 'Dec',
+        }
 
+        def abbr(m):
+            return month_map.get(m.lower(), m[:3].title())
+
+        # Find month-year tokens
+        my = [m.groups() for m in re.finditer(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s*(?:,\s*)?((?:19|20)\d{2})\b', t, flags=re.IGNORECASE)]
+        if my:
+            start_m, start_y = my[0]
+            start_m = abbr(start_m)
+            if len(my) >= 2:
+                end_m, end_y = my[-1]
+                end_m = abbr(end_m)
+                return f"{start_m} {start_y}-{end_m} {end_y}"
+            # Single month-year; attach Present or end year if available
+            if present:
+                return f"{start_m} {start_y}-Present"
+            end_years = re.findall(r'\b((?:19|20)\d{2})\b', t)
+            if len(end_years) >= 2:
+                return f"{start_m} {end_years[0]}-{end_years[-1]}"
+            return f"{start_m} {start_y}"
+
+        # Fallback to years-only
+        years = re.findall(r'\b(?:19|20)\d{2}\b', t)
         if len(years) >= 2:
             return f"{years[0]}-{years[-1]}"
-        elif len(years) == 1:
+        if len(years) == 1:
             return years[0]
-        else:
-            return ''
+        return ''
     
     def _parse_company_role(self, title):
         """Parse company and role from title line"""
@@ -522,62 +732,154 @@ class WordFormatter:
     def _insert_table_after(self, doc, anchor, rows=1, cols=2):
         """Create a table and position it immediately after the given anchor (Paragraph or Table)."""
         try:
-            # Create table using python-docx API
+            # Simply add table to document - python-docx will handle placement
             table = doc.add_table(rows=rows, cols=cols)
-            tbl = table._element
-
-            # Resolve anchor element (paragraph or table)
-            if hasattr(anchor, '_element'):
-                anchor_elm = anchor._element
-            else:
-                anchor_elm = anchor
-
-            # Move table right after the anchor in the document body
-            anchor_elm.addnext(tbl)
+            
+            # Try to move it after anchor, but don't fail if it doesn't work
+            try:
+                tbl = table._element
+                if hasattr(anchor, '_element'):
+                    anchor_elm = anchor._element
+                elif hasattr(anchor, '_tbl'):
+                    anchor_elm = anchor._tbl
+                else:
+                    anchor_elm = anchor
+                
+                # Only move if we have a valid anchor
+                if anchor_elm is not None and hasattr(anchor_elm, 'addnext'):
+                    anchor_elm.addnext(tbl)
+            except:
+                # If moving fails, table will just be at end of document
+                pass
 
             return table
 
         except Exception as e:
             print(f"  ⚠️  Error creating table: {e}")
-            import traceback
-            traceback.print_exc()
             return None
 
-    def _delete_following_bullets(self, paragraph, max_scan=40):
-        """Delete bullet-like paragraphs after a heading/placeholder to avoid duplicate raw lists.
-        Only removes paragraphs that look like bullets or numbered lists; stops at next heading/table.
+    def _cleanup_duplicate_bullets_after_section(self, doc, section_heading_para, next_section_name):
         """
+        AGGRESSIVE cleanup: Scan entire document after inserting formatted content
+        and delete ANY remaining bullet points between this section and next section.
+        This ensures NO duplication of raw content.
+        """
+        try:
+            print(f"    🧹 AGGRESSIVE cleanup: Removing ALL raw content until '{next_section_name}'...")
+            
+            # Find the section heading paragraph index
+            heading_idx = None
+            for idx, para in enumerate(doc.paragraphs):
+                if para._element == section_heading_para._element:
+                    heading_idx = idx
+                    break
+            
+            if heading_idx is None:
+                return
+            
+            # Now scan from heading to next section and delete EVERYTHING except tables and section headings
+            deleted = 0
+            paras_to_delete = []
+            
+            # List of all section keywords to preserve
+            section_keywords = ['EDUCATION', 'SKILLS', 'SUMMARY', 'PROJECT', 'CERTIFICATION', 
+                              'EXPERIENCE', 'WORK EXPERIENCE', 'EMPLOYMENT HISTORY', 
+                              'PROFESSIONAL EXPERIENCE', 'CAREER HISTORY', 'QUALIFICATIONS',
+                              'ACHIEVEMENTS', 'AWARDS', 'LANGUAGES']
+            
+            for idx in range(heading_idx + 1, len(doc.paragraphs)):
+                para = doc.paragraphs[idx]
+                text = para.text.strip().upper()
+                
+                # Stop at next section
+                if next_section_name in text and len(text) < 50:
+                    print(f"       Stopped at next section: {text[:40]}")
+                    break
+                
+                # Skip if paragraph is empty
+                if not text:
+                    continue
+                
+                # PRESERVE section headings (don't delete them!)
+                is_section_heading = any(keyword in text for keyword in section_keywords) and len(text) < 50
+                if is_section_heading:
+                    print(f"       Preserved section heading: '{text[:40]}'")
+                    continue
+                
+                # DELETE this paragraph (it's duplicate raw content)
+                paras_to_delete.append(para)
+                deleted += 1
+                if deleted <= 5:
+                    print(f"       Removing duplicate: '{text[:60]}'")
+            
+            # Actually delete the paragraphs
+            for para in paras_to_delete:
+                p_element = para._element
+                p_element.getparent().remove(p_element)
+            
+            print(f"    🧹 Cleanup complete: Removed {deleted} duplicate paragraphs")
+            
+        except Exception as e:
+            print(f"    ⚠️  Cleanup error: {e}")
+    
+    def _delete_following_bullets(self, paragraph, max_scan=200):
+        """Delete ALL content after a heading until next section - includes TABLES and paragraphs."""
         try:
             body = paragraph._element.getparent()
             node = paragraph._element.getnext()
+            deleted_paras = 0
+            deleted_tables = 0
             scanned = 0
+            
+            print(f"    🔍 Starting deletion scan (max {max_scan} items)...")
+            
             while node is not None and scanned < max_scan:
                 scanned += 1
+                next_node = node.getnext()
+                
+                # DELETE TABLES (raw content might be in tables)
                 if node.tag.endswith('tbl'):
-                    break
+                    print(f"       Deleting table #{deleted_tables + 1}")
+                    body.remove(node)
+                    deleted_tables += 1
+                    node = next_node
+                    continue
+                
+                # DELETE PARAGRAPHS
                 if node.tag.endswith('p'):
                     # Extract plain text
                     text_nodes = node.xpath('.//w:t', namespaces=node.nsmap) if hasattr(node, 'xpath') else []
                     text = ''.join([t.text for t in text_nodes if t is not None and t.text is not None])
                     txt = (text or '').strip()
                     norm = txt.upper()
-                    # Stop at next heading keywords
-                    if any(k in norm for k in ['EDUCATION', 'SKILLS', 'SUMMARY', 'PROJECT', 'CERTIFICATION', 'EXPERIENCE', 'WORK EXPERIENCE', 'EMPLOYMENT HISTORY']):
+                    
+                    # Stop ONLY at next section heading (not at tables or bullets)
+                    section_keywords = ['EDUCATION', 'SKILLS', 'SUMMARY', 'PROJECT', 'CERTIFICATION', 
+                                      'EXPERIENCE', 'WORK EXPERIENCE', 'EMPLOYMENT HISTORY', 
+                                      'PROFESSIONAL EXPERIENCE', 'CAREER HISTORY', 'QUALIFICATIONS']
+                    
+                    if any(k in norm for k in section_keywords) and len(txt) < 50:
+                        # This looks like a next section heading, stop deleting
+                        print(f"       Stopped at next section: '{txt[:40]}'")
                         break
-                    # Bullet/numbered heuristics
-                    is_bullet = txt.startswith(('•', '-', '–', '—', '*', '●'))
-                    is_numbered = bool(re.match(r'^\d+[\).\-\s]', txt))
-                    if is_bullet or is_numbered:
-                        nxt = node.getnext()
-                        body.remove(node)
-                        node = nxt
-                        continue
-                    else:
-                        # If we hit a non-bullet normal paragraph, stop cleanup
-                        break
-                node = node.getnext()
-        except Exception:
-            pass
+                    
+                    # DELETE THIS PARAGRAPH (raw content)
+                    if deleted_paras < 5:  # Log first 5 deletions
+                        print(f"       Deleting para: '{txt[:60]}'...")
+                    body.remove(node)
+                    deleted_paras += 1
+                
+                node = next_node
+            
+            print(f"    🗑️  DELETED: {deleted_paras} paragraphs + {deleted_tables} tables (scanned {scanned} items)")
+            
+            if deleted_paras == 0 and deleted_tables == 0:
+                print(f"    ⚠️  WARNING: Nothing was deleted! Content might still be there.")
+                
+        except Exception as e:
+            print(f"    ⚠️  Error deleting content: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _collect_bullets_after_heading(self, paragraph, max_scan=50):
         """Collect consecutive bullet-like paragraphs immediately after a heading/placeholder."""
@@ -616,11 +918,18 @@ class WordFormatter:
         """Delete the immediate next table after a heading/placeholder (used when raw content is a table)."""
         try:
             node = paragraph._element.getnext()
-            if node is not None and node.tag.endswith('tbl'):
+            deleted = 0
+            # Delete multiple tables if they exist
+            while node is not None and node.tag.endswith('tbl'):
+                next_node = node.getnext()
                 parent = node.getparent()
                 parent.remove(node)
-        except Exception:
-            pass
+                deleted += 1
+                node = next_node
+            if deleted > 0:
+                print(f"    🗑️  Deleted {deleted} old table(s)")
+        except Exception as e:
+            print(f"    ⚠️  Error deleting tables: {e}")
     
     def _build_experience_from_bullets(self, bullets):
         """Best-effort convert raw bullet lines into structured exp list when parser is empty."""
@@ -683,6 +992,75 @@ class WordFormatter:
             edus.append({'degree': degree, 'institution': institution, 'year': year, 'details': []})
             i += 1
         return edus
+
+    def _optimize_details(self, details, max_bullets=12, max_words=22, max_chars=160):
+        """Shorten and normalize bullet points while preserving meaning.
+        - trims bullets, normalizes acronyms, removes duplicate entries
+        - caps each bullet by words/chars
+        """
+        cleaned = []
+        seen = set()
+        for d in details:
+            if not d or not isinstance(d, str):
+                continue
+            t = d.strip()
+            if not t:
+                continue
+            # Remove leading bullet chars
+            t = t.lstrip('•–—-*● \t-').strip()
+            # Normalize common wording
+            repl = [
+                (r'\bas well as\b', 'and'),
+                (r'\bin order to\b', 'to'),
+                (r'\bkey performance indicators\s*\(([^\)]+)\)', r'\1'),
+                (r'\bkey performance indicators\b', 'KPIs'),
+                (r'\bquickbooks\b', 'QuickBooks'),
+                (r'\bums?\s*worldship\b', 'UPS WorldShip'),
+            ]
+            for pattern, repl_to in repl:
+                t = re.sub(pattern, repl_to, t, flags=re.IGNORECASE)
+
+            t = self._shorten_text(t, max_words=max_words, max_chars=max_chars)
+            t = self._normalize_acronyms(t)
+
+            key = t.lower()
+            if key and key not in seen:
+                seen.add(key)
+                cleaned.append(t.rstrip())
+
+            if len(cleaned) >= max_bullets:
+                break
+        return cleaned
+
+    def _normalize_acronyms(self, text):
+        """Normalize common acronyms casing."""
+        mapping = {
+            'kpi': 'KPI', 'kpis': 'KPIs',
+            'lms': 'LMS',
+            'qa': 'QA',
+        }
+        def repl(m):
+            return mapping.get(m.group(0).lower(), m.group(0))
+        return re.sub(r'\b(kpis?|lms|qa)\b', repl, text, flags=re.IGNORECASE)
+
+    def _shorten_text(self, text, max_words=22, max_chars=160):
+        """Heuristic shortening: prefer cutting at clause boundaries, then word limit."""
+        t = re.sub(r'\s+', ' ', text).strip()
+        # Prefer to cut at clause markers if too long
+        if len(t) > max_chars:
+            for marker in ['; ', '. ', ' which ', ' that ', ' ensuring ', ' including ', ' while ', ' whereas ', ' whereby ']:
+                idx = t.lower().find(marker)
+                if 0 < idx <= max_chars:
+                    t = t[:idx].rstrip('.; ,')
+                    break
+        # Enforce word cap
+        words = t.split()
+        if len(words) > max_words:
+            t = ' '.join(words[:max_words]).rstrip(',;')
+        # Ensure terminal period for readability
+        if t and t[-1] not in '.!?':
+            t = t + '.'
+        return t
     
     def _create_replacement_map(self):
         """Create comprehensive replacement map"""
@@ -691,14 +1069,15 @@ class WordFormatter:
         # Personal information - Multiple formats
         # NOTE: Be specific to avoid replacing CAI contact manager info
         if self.resume_data.get('name'):
-            replacements['[NAME]'] = self.resume_data['name']
-            replacements['[CANDIDATE NAME]'] = self.resume_data['name']
-            replacements['<CANDIDATE NAME>'] = self.resume_data['name']
-            replacements["<Candidate's full name>"] = self.resume_data['name']
-            replacements['<Candidate Name>'] = self.resume_data['name']
-            replacements['<Name>'] = self.resume_data['name']
-            replacements['Your Name'] = self.resume_data['name']
-            replacements['CANDIDATE NAME'] = self.resume_data['name']
+            display_name = f"<{self.resume_data['name']}>"
+            replacements['[NAME]'] = display_name
+            replacements['[CANDIDATE NAME]'] = display_name
+            replacements['<CANDIDATE NAME>'] = display_name
+            replacements["<Candidate's full name>"] = display_name
+            replacements['<Candidate Name>'] = display_name
+            replacements['<Name>'] = display_name
+            replacements['Your Name'] = display_name
+            replacements['CANDIDATE NAME'] = display_name
             # DO NOT replace "Insert name" as it might be in CAI contact section
         
         if self.resume_data.get('email'):
@@ -797,294 +1176,401 @@ class WordFormatter:
             pass
     
     def _add_sections_content(self, doc):
-        """Add resume sections to document and replace placeholders"""
+        """Add resume sections to document and replace placeholders - SIMPLIFIED to prevent duplication"""
         sections_added = 0
         
-        # Section placeholder patterns
-        section_placeholders = {
-            'experience': [
-                "<List candidate's relevant employment history>",
-                '<List employment history>',
-                '<Employment History>',
-                '<Work Experience>',
-                '<Professional Experience>',
-                '<Career History>',
-                '<History of Employment>',
-                '<History of the Employer>',
-                '<Employer History>',
-                '<Experience details>',
-                'List relevant employment history',
-                'List the employment history'
-            ],
-            'education': [
-                "<List candidate's education background>",
-                '<List education background>',
-                '<Education Background>',
-                '<Education details>',
-                'List education background'
-            ],
-            'skills': [
-                '<List skills>',
-                '<Skills>',
-                '<Technical Skills>',
-                'List skills'
-            ],
-            'summary': [
-                '<Professional Summary>',
-                '<Summary>',
-                '<Objective>',
-                'Professional summary'
-            ]
-        }
+        # Track what we've inserted to prevent duplicates
+        if not hasattr(self, '_experience_inserted'):
+            self._experience_inserted = False
+        if not hasattr(self, '_education_inserted'):
+            self._education_inserted = False
         
-        resume_sections = self.resume_data.get('sections', {})
+        print(f"\n🔍 Scanning document for experience/education sections...")
         
-        # Replace section placeholders with actual content
-        print(f"\n🔍 Looking for section placeholders...")
-        
+        # SINGLE PASS: Look for headings only (ignore placeholders to avoid duplication)
         for para_idx, paragraph in enumerate(doc.paragraphs):
-            para_text = paragraph.text.strip()
+            para_text = paragraph.text.upper().strip()
             
-            # Check for section placeholders
-            for section_key, placeholders in section_placeholders.items():
-                for placeholder in placeholders:
-                    if placeholder.lower() in para_text.lower():
-                        print(f"  📍 Found placeholder: '{placeholder}' in paragraph {para_idx}")
-                        
-                        if section_key == 'experience':
-                            experiences = self.resume_data.get('experience', [])
-                            if experiences:
-                                # Clear placeholder paragraph
-                                for run in paragraph.runs:
-                                    run.text = ''
-                                # Remove any existing bullet lines under this heading/placeholder
-                                self._delete_following_bullets(paragraph)
-                                # Insert structured blocks after this paragraph
-                                last_element = paragraph
-                                for exp in experiences[:10]:
-                                    table = self._insert_experience_block(doc, last_element, exp)
-                                    if table:
-                                        last_element = table.rows[0].cells[0].paragraphs[0]
-                                sections_added += 1
-                                print(f"  ✅ Inserted {len(experiences[:10])} structured experience block(s)")
-                                continue
-                        
-                        if section_key == 'education':
-                            education = self.resume_data.get('education', [])
-                            if education:
-                                # Clear placeholder paragraph
-                                for run in paragraph.runs:
-                                    run.text = ''
-                                # Remove any existing bullet lines under this heading/placeholder
-                                self._delete_following_bullets(paragraph)
-                                # Insert structured blocks after this paragraph
-                                last_element = paragraph
-                                for edu in education[:5]:
-                                    table = self._insert_education_block(doc, last_element, edu)
-                                    if table:
-                                        last_element = table.rows[0].cells[0].paragraphs[0]
-                                sections_added += 1
-                                print(f"  ✅ Inserted {len(education[:5])} structured education block(s)")
-                                continue
-                        
-                        # Fallback for other sections: bullets
-                        content = self._find_matching_resume_section(section_key, resume_sections)
-                        if content and len(content) > 0:
-                            content_lines = []
-                            for item in content[:10]:  # Limit to 10 items
-                                if item.strip():
-                                    if not item.strip().startswith('•'):
-                                        content_lines.append(f'• {item.strip()}')
-                                    else:
-                                        content_lines.append(item.strip())
-                            content_text = '\n'.join(content_lines)
-                            full_text = paragraph.text
-                            pattern = re.compile(re.escape(placeholder), re.IGNORECASE)
-                            new_text = pattern.sub(content_text, full_text)
-                            if new_text != full_text:
-                                for run in paragraph.runs:
-                                    run.text = ''
-                                if paragraph.runs:
-                                    paragraph.runs[0].text = new_text
-                                else:
-                                    paragraph.add_run(new_text)
-                                sections_added += 1
-                                print(f"  ✅ Replaced with {len(content_lines)} items from resume")
-                        else:
-                            print(f"  ⚠️  No matching content found in resume for '{section_key}'")
-        
-        # Also look for section headings and add content after them
-        section_markers = {
-            'experience': ['EMPLOYMENT HISTORY', 'WORK EXPERIENCE', 'PROFESSIONAL EXPERIENCE', 'EXPERIENCE', 'CAREER HISTORY', 'HISTORY OF EMPLOYMENT', 'HISTORY OF THE EMPLOYER', 'EMPLOYER HISTORY'],
-            'education': ['EDUCATION', 'ACADEMIC BACKGROUND', 'QUALIFICATIONS'],
-            'skills': ['SKILLS', 'TECHNICAL SKILLS', 'CORE COMPETENCIES'],
-            'summary': ['SUMMARY', 'PROFESSIONAL SUMMARY', 'OBJECTIVE', 'PROFILE'],
-        }
-        
-        for para_idx, paragraph in enumerate(doc.paragraphs):
-            para_text_upper = paragraph.text.upper().strip()
-            
-            for section_key, markers in section_markers.items():
-                # Match either exact heading or heading containing the marker text
-                if any((marker == para_text_upper) or (marker in para_text_upper) for marker in markers):
-                    # Found a section heading
-                    
-                    # For experience and education, use structured blocks
-                    if section_key == 'experience':
-                        experiences = self.resume_data.get('experience', [])
-                        # Fallback: derive from raw bullets if parser returned none
-                        if not experiences:
-                            raw_bullets = self._collect_bullets_after_heading(paragraph)
-                            experiences = self._build_experience_from_bullets(raw_bullets)
-                        if experiences:
-                            print(f"  • Found EXPERIENCE heading: {paragraph.text} → inserting {len(experiences)} structured block(s)")
-                            # Remove any existing bullet lines under this heading before inserting
-                            self._delete_following_bullets(paragraph)
-                            last_element = paragraph
-                            for exp in experiences[:10]:  # Limit to 10 experiences
-                                table = self._insert_experience_block(doc, last_element, exp)
-                                if table:
-                                    # Update last_element to be the table so next one inserts after it
-                                    last_element = table.rows[0].cells[0].paragraphs[0]
-                            sections_added += 1
-                    
-                    elif section_key == 'education':
-                        education = self.resume_data.get('education', [])
-                        # Fallback: derive from raw bullets if parser returned none
-                        if not education:
-                            raw_bullets = self._collect_bullets_after_heading(paragraph)
-                            education = self._build_education_from_bullets(raw_bullets)
-                        if education:
-                            print(f"  • Found EDUCATION heading: {paragraph.text} → inserting {len(education)} structured block(s)")
-                            # Remove any existing bullet lines under this heading before inserting
-                            self._delete_following_bullets(paragraph)
-                            last_element = paragraph
-                            for edu in education[:5]:  # Limit to 5 education entries
-                                table = self._insert_education_block(doc, last_element, edu)
-                                if table:
-                                    # Update last_element to be the table so next one inserts after it
-                                    last_element = table.rows[0].cells[0].paragraphs[0]
-                            sections_added += 1
-                    
-                    else:
-                        # For other sections (skills, summary), use simple bullets
-                        content = self._find_matching_resume_section(section_key, resume_sections)
-                        if content:
-                            print(f"  • Found section heading: {paragraph.text} → inserting {len(content[:10])} item(s)")
-                            insert_after = paragraph
-                            for item in content[:10]:
-                                txt = item.strip()
-                                if not txt:
-                                    continue
-                                if not txt.startswith('•'):
-                                    txt = f"• {txt}"
-                                insert_after = self._insert_paragraph_after(insert_after, txt)
-                            sections_added += 1
-            
-            # Generic heading catch-all: lines containing both HISTORY and (EMPLOY/EMPLOYER/WORK/CAREER)
-            if 'HISTORY' in para_text_upper and any(k in para_text_upper for k in ['EMPLOY', 'EMPLOYER', 'WORK', 'CAREER']):
+            # EXPERIENCE SECTION
+            if not self._experience_inserted and any(marker in para_text for marker in ['EMPLOYMENT HISTORY', 'WORK EXPERIENCE', 'PROFESSIONAL EXPERIENCE', 'EXPERIENCE']):
                 experiences = self.resume_data.get('experience', [])
+                # Fallback: build structured experiences from the raw bullets beneath the heading
+                if not experiences:
+                    raw_bullets = self._collect_bullets_after_heading(paragraph, max_scan=120)
+                    if raw_bullets:
+                        experiences = self._build_experience_from_bullets(raw_bullets)
+                        print(f"  🔄 Built {len(experiences)} experience entries from raw bullets")
                 if experiences:
-                    print(f"  • Found generic experience heading: {paragraph.text} → inserting {len(experiences)} structured block(s)")
-                    # Remove any existing bullet lines under this heading before inserting
+                    print(f"  ✓ Found EXPERIENCE at paragraph {para_idx}: '{paragraph.text[:50]}'")
+                    
+                    # STEP 1: Clear the heading paragraph (keep only the heading text)
+                    original_heading = paragraph.text.strip()
+                    for run in paragraph.runs:
+                        run.text = ''
+                    if paragraph.runs:
+                        paragraph.runs[0].text = 'EMPLOYMENT HISTORY'
+                        paragraph.runs[0].bold = True
+                        paragraph.runs[0].font.size = Pt(12)
+                    
+                    # STEP 2: Delete ALL following content (tables + paragraphs)
                     self._delete_following_bullets(paragraph)
+                    self._delete_next_table(paragraph)
+                    
+                    # STEP 3: Insert clean structured blocks
                     last_element = paragraph
                     for exp in experiences[:10]:
                         table = self._insert_experience_block(doc, last_element, exp)
                         if table:
-                            last_element = table.rows[0].cells[0].paragraphs[0]
+                            last_element = table
+                    
+                    # STEP 4: Skip aggressive cleanup to preserve newly inserted bullets
+                    # self._cleanup_duplicate_bullets_after_section(doc, paragraph, 'EDUCATION')
+                    
+                    self._experience_inserted = True
                     sections_added += 1
+                    print(f"    → Inserted {len(experiences[:10])} experience entries")
+                    continue
+            
+            # EDUCATION SECTION
+            if not self._education_inserted and 'EDUCATION' in para_text:
+                education = self.resume_data.get('education', [])
+                if education:
+                    print(f"  ✓ Found EDUCATION at paragraph {para_idx}: '{paragraph.text[:50]}'")
+                    
+                    # STEP 1: Clear the heading paragraph (keep only the heading text)
+                    for run in paragraph.runs:
+                        run.text = ''
+                    if paragraph.runs:
+                        paragraph.runs[0].text = 'EDUCATION'
+                        paragraph.runs[0].bold = True
+                        paragraph.runs[0].font.size = Pt(12)
+                    
+                    # STEP 2: Delete ALL following content (tables + paragraphs)
+                    self._delete_following_bullets(paragraph)
+                    self._delete_next_table(paragraph)
+                    
+                    # STEP 3: Insert clean structured blocks
+                    last_element = paragraph
+                    for edu in education[:5]:
+                        table = self._insert_education_block(doc, last_element, edu)
+                        if table:
+                            last_element = table
+                    
+                    # STEP 4: Skip aggressive cleanup to preserve newly inserted bullets
+                    # self._cleanup_duplicate_bullets_after_section(doc, paragraph, 'SKILLS')
+                    
+                    self._education_inserted = True
+                    sections_added += 1
+                    print(f"    → Inserted {len(education[:5])} education entries")
+                    continue
         
-        # PASS 3: Scan tables for headings inside cells and insert structured blocks there too
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        para_text_upper = (paragraph.text or '').upper().strip()
-                        # EXPERIENCE in tables
-                        if any(m in para_text_upper for m in ['EMPLOYMENT HISTORY', 'WORK EXPERIENCE', 'PROFESSIONAL EXPERIENCE', 'EXPERIENCE', 'CAREER HISTORY', 'HISTORY OF EMPLOYMENT', 'HISTORY OF THE EMPLOYER', 'EMPLOYER HISTORY']):
-                            experiences = self.resume_data.get('experience', [])
-                            if not experiences:
-                                raw_bullets = self._collect_bullets_after_heading(paragraph)
-                                experiences = self._build_experience_from_bullets(raw_bullets)
-                            if experiences:
-                                self._delete_following_bullets(paragraph)
-                                self._delete_next_table(paragraph)
-                                last_element = paragraph
-                                for exp in experiences[:10]:
-                                    tbl = self._insert_experience_block(doc, last_element, exp)
-                                    if tbl:
-                                        last_element = tbl.rows[0].cells[0].paragraphs[0]
-                                sections_added += 1
-                        # EDUCATION in tables
-                        if any(m in para_text_upper for m in ['EDUCATION', 'ACADEMIC BACKGROUND', 'QUALIFICATIONS']):
-                            education = self.resume_data.get('education', [])
-                            if not education:
-                                raw_bullets = self._collect_bullets_after_heading(paragraph)
-                                education = self._build_education_from_bullets(raw_bullets)
-                            if education:
-                                self._delete_following_bullets(paragraph)
-                                self._delete_next_table(paragraph)
-                                last_element = paragraph
-                                for edu in education[:5]:
-                                    tbl = self._insert_education_block(doc, last_element, edu)
-                                    if tbl:
-                                        last_element = tbl.rows[0].cells[0].paragraphs[0]
-                                sections_added += 1
-        
+        print(f"\n✅ Section insertion complete. Experience inserted: {self._experience_inserted}, Education inserted: {self._education_inserted}")
         return sections_added
     
+    def _detect_table_type(self, table):
+        """
+        DYNAMICALLY detect table type by analyzing column headers.
+        Returns: 'skills', 'experience', 'education', or None
+        """
+        if len(table.rows) < 1:
+            return None
+        
+        # Get all text from first few rows (headers might span multiple rows)
+        header_text = ''
+        for row_idx in range(min(3, len(table.rows))):
+            for cell in table.rows[row_idx].cells:
+                header_text += ' ' + cell.text.lower()
+        
+        # Skills table indicators
+        skills_indicators = ['skill', 'technology', 'competency', 'expertise', 'proficiency', 
+                           'years used', 'last used', 'technical']
+        
+        # Experience/Employment table indicators  
+        experience_indicators = ['employment', 'company', 'employer', 'position', 'role', 
+                                'job title', 'work history', 'experience', 'responsibilities']
+        
+        # Education table indicators
+        education_indicators = ['education', 'degree', 'institution', 'university', 'college', 
+                              'school', 'graduation', 'qualification']
+        
+        # Count matches for each type
+        skills_score = sum(1 for ind in skills_indicators if ind in header_text)
+        exp_score = sum(1 for ind in experience_indicators if ind in header_text)
+        edu_score = sum(1 for ind in education_indicators if ind in header_text)
+        
+        # Return type with highest score
+        if skills_score > 0 and skills_score >= exp_score and skills_score >= edu_score:
+            return 'skills'
+        elif exp_score > 0 and exp_score >= edu_score:
+            return 'experience'
+        elif edu_score > 0:
+            return 'education'
+        
+        return None
+    
+    def _fill_dynamic_table(self, table, table_type):
+        """
+        DYNAMICALLY fill table based on column headers and data type.
+        Works with ANY column structure!
+        """
+        if len(table.rows) < 1:
+            return 0
+        
+        print(f"     🔍 Analyzing table structure...")
+        
+        # Get column headers (from first row)
+        headers = [cell.text.strip().lower() for cell in table.rows[0].cells]
+        print(f"     📋 Column headers: {headers}")
+        
+        # Map columns to data fields intelligently
+        column_mapping = self._map_columns_to_fields(headers, table_type)
+        print(f"     🗺️  Column mapping: {column_mapping}")
+        
+        # Get data to fill
+        if table_type == 'skills':
+            data_items = self._get_skills_data()
+        elif table_type == 'experience':
+            data_items = self._get_experience_data()
+        elif table_type == 'education':
+            data_items = self._get_education_data()
+        else:
+            return 0
+        
+        if not data_items:
+            print(f"     ⚠️  No {table_type} data available")
+            return 0
+        
+        print(f"     📊 Found {len(data_items)} {table_type} items to fill")
+        
+        # Clear existing rows (keep header)
+        for i in reversed(range(1, len(table.rows))):
+            table._element.remove(table.rows[i]._element)
+        
+        # Fill rows dynamically
+        filled = 0
+        for item in data_items[:15]:  # Limit to 15 rows
+            new_row = table.add_row()
+            
+            for col_idx, field_name in column_mapping.items():
+                if col_idx < len(new_row.cells) and field_name:
+                    value = item.get(field_name, '')
+                    new_row.cells[col_idx].text = str(value)
+            
+            filled += 1
+            if filled <= 3:
+                print(f"        ✓ Row {filled}: {list(item.values())[:3]}")
+        
+        return filled
+    
+    def _map_columns_to_fields(self, headers, table_type):
+        """
+        INTELLIGENT column mapping - maps table columns to resume data fields
+        based on semantic understanding of column names.
+        """
+        mapping = {}  # {column_index: field_name}
+        
+        if table_type == 'skills':
+            # Define possible column patterns for skills
+            patterns = {
+                'skill': ['skill', 'technology', 'competency', 'expertise', 'tool', 'name'],
+                'years': ['year', 'experience', 'exp', 'yrs', 'duration', 'used'],
+                'last_used': ['last', 'recent', 'current', 'latest', 'when']
+            }
+        elif table_type == 'experience':
+            patterns = {
+                'company': ['company', 'employer', 'organization', 'firm'],
+                'role': ['role', 'position', 'title', 'job'],
+                'duration': ['date', 'year', 'period', 'duration', 'from', 'to', 'when'],
+                'location': ['location', 'city', 'state', 'place'],
+                'responsibilities': ['responsibilit', 'duties', 'description', 'summary']
+            }
+        elif table_type == 'education':
+            patterns = {
+                'degree': ['degree', 'qualification', 'certificate', 'program'],
+                'institution': ['institution', 'university', 'college', 'school'],
+                'year': ['year', 'date', 'graduation', 'completion'],
+                'field': ['field', 'major', 'specialization', 'subject'],
+                'gpa': ['gpa', 'grade', 'marks', 'score']
+            }
+        else:
+            return mapping
+        
+        # Map each column to best matching field
+        for col_idx, header in enumerate(headers):
+            header_lower = header.lower()
+            best_match = None
+            best_score = 0
+            
+            for field_name, keywords in patterns.items():
+                score = sum(1 for kw in keywords if kw in header_lower)
+                if score > best_score:
+                    best_score = score
+                    best_match = field_name
+            
+            if best_match and best_score > 0:
+                mapping[col_idx] = best_match
+                print(f"        Column {col_idx} ('{header}') → {best_match}")
+        
+        return mapping
+    
+    def _get_skills_data(self):
+        """Get skills data in standardized format"""
+        skills_list = []
+        raw_skills = self.resume_data.get('skills', [])
+        
+        for skill in raw_skills[:15]:
+            skill_name = skill if isinstance(skill, str) else skill.get('name', '')
+            skills_list.append({
+                'skill': skill_name,
+                'years': '2+ years',  # Default
+                'last_used': 'Recent'
+            })
+        
+        return skills_list
+    
+    def _get_experience_data(self):
+        """Get experience data in standardized format"""
+        exp_list = []
+        experiences = self.resume_data.get('experience', [])
+        
+        for exp in experiences[:10]:
+            exp_list.append({
+                'company': exp.get('company', ''),
+                'role': exp.get('role', ''),
+                'duration': exp.get('duration', ''),
+                'location': '',  # Extract if available
+                'responsibilities': '\n'.join(exp.get('details', [])[:3])
+            })
+        
+        return exp_list
+    
+    def _get_education_data(self):
+        """Get education data in standardized format"""
+        edu_list = []
+        education = self.resume_data.get('education', [])
+        
+        for edu in education[:5]:
+            edu_list.append({
+                'degree': edu.get('degree', ''),
+                'institution': edu.get('institution', ''),
+                'year': edu.get('year', ''),
+                'field': '',  # Extract from degree if available
+                'gpa': ''
+            })
+        
+        return edu_list
+    
     def _is_skills_table(self, table):
-        """Check if table is a skills table by examining headers"""
-        if len(table.rows) < 2:  # Need at least header + 1 row
+        """Check if table is a skills table by examining headers - FLEXIBLE detection"""
+        if len(table.rows) < 1:  # Changed from 2 to 1 - just need header row
+            print(f"       ⚠️  Table has <1 rows ({len(table.rows)}), skipping")
             return False
         
-        # Get first row (header) text
-        header_row = table.rows[0]
-        header_texts = [cell.text.strip().lower() for cell in header_row.cells]
+        # Get first row (header) text - check multiple rows in case header spans multiple
+        header_texts = []
+        rows_to_check = min(3, len(table.rows))  # Check first 3 rows for headers
         
-        # Check for skills table indicators
-        skills_keywords = ['skill', 'skills', 'technology', 'competency']
-        years_keywords = ['years', 'experience', 'years used', 'years of experience']
-        last_used_keywords = ['last used', 'last', 'recent', 'most recent']
+        for row_idx in range(rows_to_check):
+            row_texts = [cell.text.strip().lower() for cell in table.rows[row_idx].cells]
+            # Skip completely empty rows
+            if any(t for t in row_texts):
+                header_texts.extend(row_texts)
         
-        has_skill_col = any(any(kw in h for kw in skills_keywords) for h in header_texts)
-        has_years_col = any(any(kw in h for kw in years_keywords) for h in header_texts)
-        has_last_used_col = any(any(kw in h for kw in last_used_keywords) for h in header_texts)
+        # Join all potential headers
+        all_headers = ' '.join(header_texts)
         
-        # It's a skills table if it has skill column and at least one other column
-        return has_skill_col and (has_years_col or has_last_used_col)
+        print(f"       🔍 Table has {len(table.rows)} rows, {len(table.columns)} columns")
+        print(f"       🔍 First row cells: {[cell.text.strip() for cell in table.rows[0].cells]}")
+        print(f"       🔍 All header candidates: {header_texts[:6]}")  # Show first 6
+        print(f"       🔍 Combined text: '{all_headers[:100]}'")  # First 100 chars
+        
+        # Check for skills table indicators - VERY FLEXIBLE
+        skills_keywords = ['skill', 'skills', 'technology', 'technologies', 'competency', 'competencies', 
+                          'technical', 'proficiency', 'expertise', 'tool', 'tools', 'qualification']
+        years_keywords = ['years', 'experience', 'years used', 'years of experience', 'exp', 'yrs', 
+                         'year', 'duration']
+        last_used_keywords = ['last used', 'last', 'recent', 'most recent', 'latest', 'when', 'current']
+        
+        has_skill_col = any(kw in all_headers for kw in skills_keywords)
+        has_years_col = any(kw in all_headers for kw in years_keywords)
+        has_last_used_col = any(kw in all_headers for kw in last_used_keywords)
+        
+        # Also check if table has exactly 3 columns (Skill, Years, Last Used pattern)
+        has_three_cols = len(table.columns) == 3
+        
+        print(f"       📊 Detection results:")
+        print(f"          - Has 3 columns: {has_three_cols} (actual: {len(table.columns)})")
+        print(f"          - Has skill column: {has_skill_col}")
+        print(f"          - Has years column: {has_years_col}")
+        print(f"          - Has last_used column: {has_last_used_col}")
+        
+        # It's a skills table if:
+        # 1. Has skill keyword AND (years OR last_used keyword)
+        # 2. OR has 3 columns with years AND last_used (common pattern)
+        is_skills = (has_skill_col and (has_years_col or has_last_used_col)) or \
+                    (has_three_cols and has_years_col and has_last_used_col)
+        
+        print(f"       {'✅ IS SKILLS TABLE' if is_skills else '❌ NOT SKILLS TABLE'}")
+        
+        return is_skills
     
     def _fill_skills_table(self, table):
         """Fill skills table with candidate's skills data"""
-        if len(table.rows) < 2:
+        if len(table.rows) < 1:
+            print(f"     ⚠️  Table has no rows, cannot fill")
             return 0
         
         # Get header row to identify columns
         header_row = table.rows[0]
         header_texts = [cell.text.strip().lower() for cell in header_row.cells]
         
-        # Find column indices
+        print(f"     📋 Filling skills table...")
+        print(f"     📋 Table headers: {header_texts}")
+        print(f"     📋 Table has {len(table.rows)} rows initially")
+        
+        # Find column indices - FLEXIBLE matching
         skill_col = None
         years_col = None
         last_used_col = None
         
+        skill_keywords = ['skill', 'technology', 'competency', 'technical', 'tool', 'expertise', 'proficiency']
+        years_keywords = ['years', 'experience', 'exp', 'yrs', 'years used']
+        last_keywords = ['last', 'recent', 'latest', 'last used', 'most recent']
+        
         for idx, header in enumerate(header_texts):
-            if 'skill' in header or 'technology' in header:
+            # Match skill column
+            if any(kw in header for kw in skill_keywords) and skill_col is None:
                 skill_col = idx
-            elif 'years' in header or 'experience' in header:
+                print(f"     ✓ Skill column: {idx} ('{header}')")
+            # Match years column
+            elif any(kw in header for kw in years_keywords) and years_col is None:
                 years_col = idx
-            elif 'last' in header or 'recent' in header:
+                print(f"     ✓ Years column: {idx} ('{header}')")
+            # Match last used column
+            elif any(kw in header for kw in last_keywords) and last_used_col is None:
                 last_used_col = idx
+                print(f"     ✓ Last Used column: {idx} ('{header}')")
         
         if skill_col is None:
+            print(f"     ⚠️  No skill column found in headers: {header_texts}")
             return 0
         
         # Get skills from resume
         skills_data = self._extract_skills_with_details()
         
-        if not skills_data:
-            return 0
+        print(f"     📊 Extracted {len(skills_data) if skills_data else 0} skills from resume")
+        
+        if not skills_data or len(skills_data) == 0:
+            print(f"     ⚠️  No skills data to fill!")
+            # Get raw skills list as fallback
+            raw_skills = self.resume_data.get('skills', [])
+            print(f"     ℹ️  Raw skills available: {len(raw_skills)}")
+            if raw_skills:
+                # Convert raw skills to format expected
+                skills_data = [{'skill': s, 'years': '1+ years', 'last_used': 'Recent'} for s in raw_skills[:15]]
+                print(f"     ✓ Using {len(skills_data)} raw skills as fallback")
+            else:
+                return 0
         
         # Clear existing data rows (keep header)
         rows_to_delete = []
@@ -1097,13 +1583,17 @@ class WordFormatter:
         
         # Add skills rows
         filled_count = 0
+        print(f"     🔄 Adding {min(15, len(skills_data))} skill rows to table...")
+        
         for skill_info in skills_data[:15]:  # Limit to 15 skills
             # Add new row
             new_row = table.add_row()
             
+            skill_name = skill_info.get('skill', '')
+            
             # Fill skill name
             if skill_col is not None:
-                new_row.cells[skill_col].text = skill_info.get('skill', '')
+                new_row.cells[skill_col].text = skill_name
             
             # Fill years
             if years_col is not None:
@@ -1114,7 +1604,10 @@ class WordFormatter:
                 new_row.cells[last_used_col].text = skill_info.get('last_used', '')
             
             filled_count += 1
+            if filled_count <= 3:
+                print(f"        ✓ Added: {skill_name}")
         
+        print(f"     ✅ Successfully filled {filled_count} skill rows")
         return filled_count
     
     def _extract_skills_with_details(self):

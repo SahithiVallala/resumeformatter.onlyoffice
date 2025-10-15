@@ -4,6 +4,7 @@ from werkzeug.utils import secure_filename
 import uuid
 import os
 import traceback
+import json
 
 from config import Config
 from models.database import TemplateDB
@@ -32,6 +33,46 @@ db = TemplateDB()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in Config.ALLOWED_EXTENSIONS
+
+
+# ===== Persistent CAI Contact storage used by both backend and formatter =====
+def _cai_store_path():
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".resume_formatter_cai_contact.json")
+
+
+@app.route('/api/cai-contact', methods=['GET'])
+def get_cai_contact():
+    """Return stored CAI contact. If none, return empty fields."""
+    path = _cai_store_path()
+    data = {"name": "", "phone": "", "email": ""}
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f) or {}
+                data.update({k: loaded.get(k, "") for k in data.keys()})
+    except Exception:
+        pass
+    return jsonify({"success": True, "contact": data})
+
+
+@app.route('/api/cai-contact', methods=['POST'])
+def save_cai_contact():
+    """Persist CAI contact. Overwrites stored values. Body: JSON {name, phone, email}."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        data = {
+            "name": str(payload.get("name", "")).strip(),
+            "phone": str(payload.get("phone", "")).strip(),
+            "email": str(payload.get("email", "")).strip(),
+        }
+        path = _cai_store_path()
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return jsonify({"success": True, "contact": data})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health():
