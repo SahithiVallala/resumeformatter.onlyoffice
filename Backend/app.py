@@ -194,32 +194,34 @@ def format_resumes():
             
             if resume_data:
                 # Format resume with intelligent formatter
-                # Determine output extension based on template type
-                if template['file_type'] in ['doc', 'docx']:
-                    output_ext = '.docx'
-                else:
-                    output_ext = '.pdf'
+                # Create DOCX only (no PDF conversion for speed)
+                docx_filename = f"formatted_{resume_id}.docx"
+                docx_path = os.path.join(Config.OUTPUT_FOLDER, docx_filename)
                 
-                output_filename = f"formatted_{resume_id}{output_ext}"
-                output_path = os.path.join(Config.OUTPUT_FOLDER, output_filename)
-                
-                if format_resume_intelligent(resume_data, template_analysis, output_path):
-                    # Check what file was actually created
-                    actual_files = []
-                    for ext in ['.pdf', '.docx']:
-                        check_path = os.path.join(Config.OUTPUT_FOLDER, f"formatted_{resume_id}{ext}")
-                        if os.path.exists(check_path):
-                            actual_files.append(f"formatted_{resume_id}{ext}")
-                    
-                    # Use the first file found (prefer PDF if both exist)
-                    if actual_files:
-                        final_filename = actual_files[0] if '.pdf' not in str(actual_files) else [f for f in actual_files if '.pdf' in f][0] if any('.pdf' in f for f in actual_files) else actual_files[0]
+                if format_resume_intelligent(resume_data, template_analysis, docx_path):
+                    # Check if DOCX was created
+                    if os.path.exists(docx_path):
+                        # Convert DOCX to PDF for preview
+                        pdf_filename = docx_filename.replace('.docx', '.pdf')
+                        pdf_path = os.path.join(Config.OUTPUT_FOLDER, pdf_filename)
+                        
+                        try:
+                            print(f"📄 Converting to PDF for preview...")
+                            from docx2pdf import convert
+                            convert(docx_path, pdf_path)
+                            print(f"✅ PDF preview created: {pdf_filename}")
+                        except Exception as e:
+                            print(f"⚠️  PDF conversion failed: {e}")
+                            # Continue anyway - DOCX is still available
+                        
+                        # Return DOCX filename for download, PDF for preview
                         formatted_files.append({
-                            'filename': final_filename,
+                            'filename': docx_filename,
                             'original': filename,
-                            'name': resume_data['name']
+                            'name': resume_data['name'],
+                            'pdf': pdf_filename if os.path.exists(pdf_path) else None
                         })
-                        print(f"✅ Successfully formatted: {filename} → {final_filename}\n")
+                        print(f"✅ Successfully formatted: {filename} → {docx_filename}\n")
                     else:
                         print(f"⚠️  Formatting completed but output file not found\n")
                 else:
@@ -251,6 +253,169 @@ def format_resumes():
 def download_file(filename):
     """Download formatted resume"""
     return send_from_directory(Config.OUTPUT_FOLDER, filename, as_attachment=True)
+
+@app.route('/api/preview/<filename>')
+def preview_file(filename):
+    """Convert DOCX to HTML for fast preview - no PDF needed"""
+    try:
+        # Security: validate filename
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+        
+        # Handle both .docx and .pdf requests (convert .pdf to .docx)
+        if filename.endswith('.pdf'):
+            filename = filename.replace('.pdf', '.docx')
+        
+        # Look for DOCX file in output directory
+        docx_path = os.path.join(Config.OUTPUT_FOLDER, filename)
+        
+        if not os.path.exists(docx_path):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+        
+        # Convert DOCX to HTML using mammoth (fast!)
+        try:
+            import mammoth
+        except ImportError:
+            return jsonify({
+                'success': False, 
+                'error': 'mammoth library not installed. Run: pip install mammoth'
+            }), 500
+        
+        print(f"📄 Converting DOCX to HTML preview: {filename}")
+        with open(docx_path, "rb") as docx_file:
+            result = mammoth.convert_to_html(docx_file)
+            html_body = result.value
+        
+        # Wrap HTML with proper styling for resume display
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{
+            font-family: 'Calibri', 'Arial', sans-serif;
+            font-size: 11pt;
+            line-height: 1.4;
+            max-width: 850px;
+            margin: 20px auto;
+            padding: 20px;
+            background: white;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }}
+        td, th {{
+            border: 1px solid #333;
+            padding: 8px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #f0f0f0;
+            font-weight: bold;
+        }}
+        h1, h2, h3 {{
+            color: #333;
+            margin-top: 15px;
+            margin-bottom: 10px;
+        }}
+        ul, ol {{
+            margin-left: 20px;
+        }}
+        p {{
+            margin: 5px 0;
+        }}
+    </style>
+</head>
+<body>
+{html_body}
+</body>
+</html>
+"""
+        
+        print(f"✅ HTML preview generated ({len(html_content)} chars)")
+        return jsonify({
+            'success': True,
+            'html': html_content,
+            'filename': filename
+        })
+        
+    except Exception as e:
+        print(f"❌ Preview error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/templates/<template_id>/thumbnail')
+def get_template_thumbnail(template_id):
+    """Generate and return template thumbnail image with caching"""
+    try:
+        template = db.get_template(template_id)
+        if not template:
+            return jsonify({'success': False, 'message': 'Template not found'}), 404
+        
+        file_path = os.path.join(Config.TEMPLATE_FOLDER, template['filename'])
+        if not os.path.exists(file_path):
+            return jsonify({'success': False, 'message': 'Template file not found'}), 404
+        
+        # Generate thumbnail (convert first page to image)
+        thumbnail_filename = f"{template_id}_thumb.png"
+        thumbnail_path = os.path.join(Config.OUTPUT_FOLDER, thumbnail_filename)
+        
+        # Check if thumbnail already exists
+        if not os.path.exists(thumbnail_path):
+            try:
+                import pythoncom
+                from docx2pdf import convert
+                import fitz  # PyMuPDF for PDF to image conversion
+                from PIL import Image
+                
+                # Convert DOCX to PDF first
+                temp_pdf = os.path.join(Config.OUTPUT_FOLDER, f"{template_id}_temp.pdf")
+                
+                pythoncom.CoInitialize()
+                try:
+                    convert(file_path, temp_pdf)
+                finally:
+                    pythoncom.CoUninitialize()
+                
+                # Convert first page of PDF to image
+                if os.path.exists(temp_pdf):
+                    pdf_document = fitz.open(temp_pdf)
+                    first_page = pdf_document[0]
+                    # Render at 120 DPI for faster loading (reduced from 150)
+                    pix = first_page.get_pixmap(matrix=fitz.Matrix(120/72, 120/72))
+                    
+                    # Save as PNG first
+                    temp_png = thumbnail_path.replace('.png', '_temp.png')
+                    pix.save(temp_png)
+                    pdf_document.close()
+                    
+                    # Optimize with PIL for smaller file size
+                    img = Image.open(temp_png)
+                    img.save(thumbnail_path, 'PNG', optimize=True, quality=85)
+                    
+                    # Clean up temp files
+                    os.remove(temp_pdf)
+                    os.remove(temp_png)
+                else:
+                    return jsonify({'success': False, 'message': 'PDF conversion failed'}), 500
+                    
+            except Exception as e:
+                print(f"⚠️  Thumbnail generation failed: {e}")
+                traceback.print_exc()
+                return jsonify({'success': False, 'message': f'Thumbnail generation failed: {str(e)}'}), 500
+        
+        # Return the thumbnail image with aggressive caching
+        response = send_from_directory(Config.OUTPUT_FOLDER, thumbnail_filename, mimetype='image/png')
+        response.headers['Cache-Control'] = 'public, max-age=86400, immutable'  # Cache for 24 hours
+        response.headers['ETag'] = template_id  # Use template ID as ETag
+        return response
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/templates/<template_id>', methods=['DELETE'])
 def delete_template(template_id):

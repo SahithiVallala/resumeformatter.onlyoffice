@@ -300,6 +300,264 @@
   }
 }
 
+/* AI Detection Banner */
+.ai-detection-banner {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 16px 24px;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 600;
+  animation: slideDown 0.5s ease;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ai-icon {
+  font-size: 24px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.2);
+  }
+}
+
+/* Help Section */
+.help-section {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.help-btn {
+  background: #f3f4f6;
+  border: 2px solid #e5e7eb;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #667eea;
+  transition: all 0.3s ease;
+}
+
+.help-btn:hover {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+}
+
+.help-tooltip {
+  position: absolute;
+  top: 45px;
+  right: 0;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+  z-index: 100;
+  min-width: 280px;
+  animation: slideDown 0.3s ease;
+}
+
+.help-tooltip h4 {
+  margin: 0 0 12px 0;
+  color: #1f2937;
+  font-size: 16px;
+}
+
+.help-tooltip ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.help-tooltip li {
+  padding: 8px 0;
+  color: #6b7280;
+  font-size: 14px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.help-tooltip li:last-child {
+  border-bottom: none;
+}
+
+/* Enhanced Dropzone */
+.upload-icons {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  margin-bottom: 20px;
+  font-size: 48px;
+}
+
+.upload-icons .file-icon {
+  animation: bounce 2s ease-in-out infinite;
+}
+
+.upload-icons .file-icon:nth-child(2) {
+  animation-delay: 0.3s;
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.format-badge {
+  background: white;
+  color: #667eea;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 6px;
+  display: inline-block;
+}
+
+/* Batch Toolbar */
+.batch-toolbar {
+  background: #f9fafb;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px 20px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbar-btn {
+  background: white;
+  border: 2px solid #e5e7eb;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #374151;
+  transition: all 0.3s ease;
+  font-size: 14px;
+}
+
+.toolbar-btn:hover:not(:disabled) {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toolbar-spacer {
+  flex: 1;
+}
+
+.upload-progress-text {
+  font-size: 14px;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+/* Enhanced File Items */
+.file-item {
+  cursor: pointer;
+  user-select: none;
+}
+
+.file-item.selected {
+  background: #667eea15;
+  border-color: #667eea;
+}
+
+.file-checkbox {
+  display: flex;
+  align-items: center;
+}
+
+.file-checkbox input {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.file-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.file-size, .file-type {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.file-type {
+  background: #f3f4f6;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.file-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.status-icon {
+  font-size: 14px;
+}
+
+.status-text {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+/* Dynamic Button Animation */
+.btn-format.active {
+  animation: buttonActivate 0.5s ease;
+}
+
+@keyframes buttonActivate {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 @media (max-width: 768px) {
   .selected-template-info {
     flex-direction: column;
@@ -319,5 +577,15 @@
   .btn-back, .btn-format {
     width: 100%;
     justify-content: center;
+  }
+
+  .batch-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .help-tooltip {
+    right: 0;
+    left: 0;
+    margin: 0 20px;
   }
 }

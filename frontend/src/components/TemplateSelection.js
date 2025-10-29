@@ -1,11 +1,70 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './TemplateSelection.css';
 
-const TemplateSelection = ({ templates, selectedTemplate, onSelect, onDelete, onUpload }) => {
+const TemplateSelection = ({ templates, selectedTemplate, onSelect, onDelete, onUpload, darkMode }) => {
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [favorites, setFavorites] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [previewTemplate, setPreviewTemplate] = useState(null);
+  const [hoveredTemplate, setHoveredTemplate] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  // Load favorites from localStorage
+  useEffect(() => {
+    const savedFavorites = localStorage.getItem('templateFavorites');
+    if (savedFavorites) {
+      setFavorites(JSON.parse(savedFavorites));
+    }
+  }, []);
+
+  // Toggle favorite status
+  const toggleFavorite = (templateId, e) => {
+    e.stopPropagation();
+    const newFavorites = favorites.includes(templateId)
+      ? favorites.filter(id => id !== templateId)
+      : [...favorites, templateId];
+    setFavorites(newFavorites);
+    localStorage.setItem('templateFavorites', JSON.stringify(newFavorites));
+  };
+
+  // Filter and sort templates
+  const filteredTemplates = templates.filter(template => {
+    return template.name.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  const sortedTemplates = [...filteredTemplates].sort((a, b) => {
+    const aFav = favorites.includes(a.id);
+    const bFav = favorites.includes(b.id);
+    if (aFav && !bFav) return -1;
+    if (!aFav && bFav) return 1;
+    return 0;
+  });
+
+  // Handle drag and drop
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile && (droppedFile.name.endsWith('.docx') || droppedFile.name.endsWith('.pdf') || droppedFile.name.endsWith('.doc'))) {
+      setFile(droppedFile);
+      setShowUploadModal(true);
+    } else {
+      alert('Please drop a valid template file (.docx, .pdf, or .doc)');
+    }
+  };
 
   const handleUpload = async (e) => {
     e.preventDefault();
@@ -59,60 +118,133 @@ const TemplateSelection = ({ templates, selectedTemplate, onSelect, onDelete, on
   };
 
   return (
-    <div className="template-selection">
+    <div className={`template-selection ${darkMode ? 'dark-mode' : ''}`}>
       <div className="phase-header">
         <h2>🎨 Choose Your Template</h2>
         <p>Select a template to format your resumes or add a new one</p>
+
+        {/* Search Bar */}
+        <div className="search-bar">
+          <span className="search-icon">🔍</span>
+          <input
+            type="text"
+            placeholder="Search templates by name..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="search-input"
+          />
+          {searchQuery && (
+            <button className="clear-search" onClick={() => setSearchQuery('')}>×</button>
+          )}
+        </div>
       </div>
 
       <div className="templates-grid">
-        {templates.map((template) => (
+        {sortedTemplates.map((template) => {
+          return (
           <div
             key={template.id}
-            className={`template-card ${selectedTemplate === template.id ? 'selected' : ''}`}
+            className={`template-card ${selectedTemplate === template.id ? 'selected' : ''} ${favorites.includes(template.id) ? 'favorite' : ''}`}
             onClick={() => onSelect(template.id)}
+            onMouseEnter={() => setHoveredTemplate(template.id)}
+            onMouseLeave={() => setHoveredTemplate(null)}
           >
             <div className="template-preview">
-              <div className="template-icon">📄</div>
-            </div>
-            <div className="template-info">
-              <h3>{template.name}</h3>
-              <div className="template-meta">
-                <span className="template-type">{(template.file_type || '').toUpperCase()}</span>
-                <span className="template-date">
-                  {(() => {
-                    try {
-                      const d = template.upload_date ? new Date(template.upload_date) : null;
-                      return d && !isNaN(d.getTime()) ? d.toLocaleDateString() : 'Just now';
-                    } catch (e) {
-                      return 'Just now';
-                    }
-                  })()}
-                </span>
+              <img 
+                src={`http://localhost:5000/api/templates/${template.id}/thumbnail`}
+                alt={template.name}
+                className="template-thumbnail-img"
+                onError={(e) => {
+                  // Fallback to icon if thumbnail fails to load
+                  const img = e.currentTarget;
+                  img.style.display = 'none';
+                  const fallback = img.nextElementSibling;
+                  if (fallback && fallback instanceof HTMLElement) {
+                    fallback.style.display = 'flex';
+                  }
+                }}
+              />
+              <div className="template-thumbnail-fallback" style={{display: 'none'}}>
+                <div className="doc-icon">📄</div>
+                <div className="doc-lines">
+                  <div className="line"></div>
+                  <div className="line"></div>
+                  <div className="line short"></div>
+                </div>
               </div>
             </div>
-            <button
-              className="delete-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(template.id);
-              }}
-            >
-              🗑️
-            </button>
+            {/* Hover Overlay with Actions */}
+            {hoveredTemplate === template.id && (
+              <div className="hover-overlay">
+                <button
+                  className="overlay-btn preview-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPreviewTemplate(template);
+                  }}
+                >
+                  🖼 Preview
+                </button>
+                <button
+                  className="overlay-btn use-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect(template.id);
+                  }}
+                >
+                  🪄 Use Template
+                </button>
+              </div>
+            )}
+
+            <div className="template-footer">
+              <div className="template-info">
+                <h3>{template.name}</h3>
+                <span className="template-subtitle">
+                  📄 {(template.file_type || 'DOCX').toUpperCase()}
+                </span>
+              </div>
+              <div className="template-actions">
+                <button
+                  className={`star-btn ${favorites.includes(template.id) ? 'starred' : ''}`}
+                  onClick={(e) => toggleFavorite(template.id, e)}
+                  title={favorites.includes(template.id) ? 'Remove from favorites' : 'Add to favorites'}
+                >
+                  {favorites.includes(template.id) ? '⭐' : '☆'}
+                </button>
+                <button
+                  className="more-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(template.id);
+                  }}
+                  title="Delete template"
+                >
+                  ⋮
+                </button>
+              </div>
+            </div>
             {selectedTemplate === template.id && (
-              <div className="selected-badge">
-                <span>✓ Selected</span>
+              <div className="selected-overlay">
+                <div className="checkmark">✓</div>
               </div>
             )}
           </div>
-        ))}
+        );
+        })}
 
-        <div className="template-card add-template" onClick={() => setShowUploadModal(true)}>
+        <div 
+          className={`template-card add-template ${dragOver ? 'drag-over' : ''}`}
+          onClick={() => setShowUploadModal(true)}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <div className="add-template-content">
-            <div className="add-icon">+</div>
+            <div className="add-icon pulse">+</div>
             <h3>Add New Template</h3>
-            <p>Upload a custom template</p>
+            <p>{dragOver ? 'Drop your .docx file here' : 'Upload or drag & drop your template'}</p>
+            <span className="upload-hint">Supports .docx, .pdf, .doc</span>
           </div>
         </div>
       </div>
@@ -167,6 +299,49 @@ const TemplateSelection = ({ templates, selectedTemplate, onSelect, onDelete, on
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Modal */}
+      {previewTemplate && (
+        <div className="modal-overlay preview-modal" onClick={() => setPreviewTemplate(null)}>
+          <div className="modal-content preview-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>📋 {previewTemplate.name}</h3>
+              <button className="close-btn" onClick={() => setPreviewTemplate(null)}>×</button>
+            </div>
+            <div className="preview-body">
+              <div className="preview-image-container">
+                <img 
+                  src={`http://localhost:5000/api/templates/${previewTemplate.id}/thumbnail`}
+                  alt={previewTemplate.name}
+                  className="preview-image"
+                  onError={(e) => {
+                    e.currentTarget.style.display = 'none';
+                  }}
+                />
+              </div>
+              <div className="preview-details">
+                <div className="detail-section">
+                  <h4>Template Information</h4>
+                  <p><strong>Name:</strong> {previewTemplate.name}</p>
+                  <p><strong>Type:</strong> {(previewTemplate.file_type || 'DOCX').toUpperCase()}</p>
+                  <p><strong>Uploaded:</strong> {new Date(previewTemplate.upload_date).toLocaleDateString()}</p>
+                </div>
+              </div>
+            </div>
+            <div className="preview-actions">
+              <button className="btn-secondary" onClick={() => setPreviewTemplate(null)}>
+                Close
+              </button>
+              <button className="btn-primary" onClick={() => {
+                onSelect(previewTemplate.id);
+                setPreviewTemplate(null);
+              }}>
+                🪄 Use This Template
+              </button>
+            </div>
           </div>
         </div>
       )}

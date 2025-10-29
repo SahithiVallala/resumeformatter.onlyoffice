@@ -517,11 +517,22 @@ class WordFormatter:
             for i, edu in enumerate(self.resume_data.get('education', [])[:3]):
                 print(f"      {i+1}. {edu.get('degree', 'N/A')[:40]} | {edu.get('institution', 'N/A')[:30]} | {edu.get('year', 'N/A')}")
         
-        # Ensure CAI CONTACT section is inserted with persistent data
+        # Ensure CAI CONTACT section is inserted with persistent data ONLY if template has it
         try:
-            self._ensure_cai_contact(doc)
+            # Check if template has CAI CONTACT section
+            has_cai_contact = False
+            for p in doc.paragraphs[:20]:  # Check first 20 paragraphs
+                if 'CAI CONTACT' in (p.text or '').upper():
+                    has_cai_contact = True
+                    break
+            
+            if has_cai_contact:
+                print(f"  ✓ Template has CAI CONTACT section, will process it")
+                self._ensure_cai_contact(doc)
+            else:
+                print(f"  ⏭️  Template does not have CAI CONTACT section, skipping")
         except Exception as e:
-            print(f"⚠️  CAI Contact insertion error: {e}")
+            print(f"❌ Error ensuring CAI contact: {e}")
         
         # Show what data we have from resume
         print(f"\n📊 Resume Data Available:")
@@ -551,6 +562,8 @@ class WordFormatter:
         truly_missing_sections = self._identify_truly_missing_sections()
         if truly_missing_sections:
             print(f"  ⚠️  Truly missing sections (will add): {truly_missing_sections}")
+            # Add the missing sections to the template
+            self._add_missing_template_sections(doc, truly_missing_sections)
         else:
             print(f"  ✅ All essential sections exist in template - will fill existing sections only")
         
@@ -586,6 +599,29 @@ class WordFormatter:
         
         # Prepare bracketed name and compute name anchor index
         candidate_name = self.resume_data.get('name', '').strip()
+        
+        # CRITICAL: Remove role/title from name if present (e.g., "JOHN DOE BUSINESS ANALYST" → "JOHN DOE")
+        # Role usually appears after multiple spaces or on same line
+        if candidate_name:
+            # Split by multiple spaces or newlines
+            name_parts = re.split(r'\s{2,}|\n', candidate_name)
+            if len(name_parts) > 1:
+                # First part is usually the actual name
+                candidate_name = name_parts[0].strip()
+                print(f"  🔧 Cleaned name: '{candidate_name}' (removed role/title)")
+            
+            # Also check for common role keywords and remove everything after them
+            role_keywords = ['BUSINESS ANALYST', 'SOFTWARE ENGINEER', 'PROJECT MANAGER', 'DATA SCIENTIST', 
+                           'DEVELOPER', 'CONSULTANT', 'SPECIALIST', 'COORDINATOR', 'MANAGER', 'ANALYST',
+                           'ENGINEER', 'ARCHITECT', 'DESIGNER', 'ADMINISTRATOR']
+            for keyword in role_keywords:
+                if keyword in candidate_name.upper():
+                    # Remove the keyword and everything after it
+                    idx = candidate_name.upper().index(keyword)
+                    candidate_name = candidate_name[:idx].strip()
+                    print(f"  🔧 Removed role keyword, final name: '{candidate_name}'")
+                    break
+        
         bracketed_name = f"<{candidate_name}>" if candidate_name else '<Candidate Name>'
         self._name_anchor_idx = None
         try:
@@ -598,8 +634,11 @@ class WordFormatter:
             ]
             for idx, p in enumerate(doc.paragraphs[:40]):
                 t = (p.text or '').strip()
-                # Skip very early paragraphs (likely CAI CONTACT)
-                if idx < 5:
+                # Skip very early paragraphs (likely CAI CONTACT) - increased from 5 to 10
+                if idx < 10:
+                    continue
+                # Also skip if this paragraph is in CAI CONTACT section
+                if 'CAI CONTACT' in t.upper():
                     continue
                 # Check for actual name or bracketed name
                 if (candidate_name and t == candidate_name) or (bracketed_name and t == bracketed_name):
@@ -717,14 +756,18 @@ class WordFormatter:
                     print(f"  💼 Found EMPLOYMENT HISTORY heading at paragraph {para_idx}: '{paragraph.text[:60]}'")
                     
                     # CRITICAL: Preserve and format the heading text
-                    original_heading = paragraph.text.strip().upper()
-                    if not any(h in original_heading for h in ['EMPLOYMENT', 'EXPERIENCE', 'WORK']):
-                        original_heading = 'EMPLOYMENT HISTORY'  # Fallback
+                    original_heading = paragraph.text.strip()
+                    if not any(h in original_heading.upper() for h in ['EMPLOYMENT', 'EXPERIENCE', 'WORK']):
+                        original_heading = 'Employment History'  # Fallback
                     
-                    # Ensure heading is properly formatted
-                    for run in paragraph.runs:
-                        run.bold = True
-                        run.font.size = Pt(11)
+                    # Clear and reset heading with proper formatting (BOLD + UNDERLINE + CAPS)
+                    paragraph.clear()
+                    run = paragraph.add_run(original_heading.upper())
+                    run.bold = True
+                    run.underline = True
+                    run.font.size = Pt(12)
+                    paragraph.paragraph_format.space_before = Pt(12)
+                    paragraph.paragraph_format.space_after = Pt(6)
                     
                     experience_data = self.resume_data.get('experience', [])
                     if not experience_data or len(experience_data) == 0:
@@ -891,7 +934,8 @@ class WordFormatter:
                                 check_text = check_para.text.strip().upper()
                                 
                                 # Stop if we hit another section heading or end of document
-                                if any(h in check_text for h in ['EMPLOYMENT', 'WORK HISTORY', 'SKILLS', 'SUMMARY', 'CERTIFICATIONS', 'PROJECTS']) and len(check_text) < 50:
+                                # CRITICAL: Include EDUCATION to prevent deleting it!
+                                if any(h in check_text for h in ['EMPLOYMENT', 'WORK HISTORY', 'EDUCATION', 'SKILLS', 'SUMMARY', 'CERTIFICATIONS', 'PROJECTS']) and len(check_text) < 50:
                                     print(f"     → Stopped clearing at section: {check_text[:30]}")
                                     break
                                 
@@ -1044,8 +1088,16 @@ class WordFormatter:
                                 pass
                         
                         # Insert summary content
+                        # Convert summary_text to lines if needed
+                        if not summary_lines and summary_text:
+                            lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+                            if len(lines) == 1:
+                                sentences = re.split(r'\.\s+(?=[A-Z])', summary_text)
+                                lines = [s.strip() + ('.' if not s.strip().endswith('.') else '') for s in sentences if s.strip()]
+                            summary_lines = lines
+                        
+                        # Always insert as bullet points (no indentation for summary)
                         if summary_lines:
-                            # Insert as bullet points
                             last_para = paragraph
                             for line in summary_lines:
                                 txt = (line or '').strip()
@@ -1053,16 +1105,11 @@ class WordFormatter:
                                     continue
                                 bullet_para = self._insert_paragraph_after(last_para, '')
                                 if bullet_para:
-                                    bullet_para.paragraph_format.left_indent = Inches(0.25)
+                                    # No left indent for summary bullets
                                     run = bullet_para.add_run('• ' + txt.lstrip('•–—-*● '))
                                     run.font.size = Pt(10)
+                                    bullet_para.paragraph_format.space_after = Pt(2)
                                     last_para = bullet_para
-                        elif summary_text:
-                            # Insert as paragraph
-                            summary_para = self._insert_paragraph_after(paragraph, summary_text)
-                            if summary_para:
-                                for run in summary_para.runs:
-                                    run.font.size = Pt(10)
                         
                         self._summary_inserted = True
                         print(f"  ✅ Inserted summary after SUMMARY heading")
@@ -1142,8 +1189,15 @@ class WordFormatter:
                 # NOTE: We don't gate by primary anchor here because paragraph indices shift after insertions
                 # Instead, we rely on the _education_inserted flag to prevent duplicates
                 
-                if is_edu_heading and len(paragraph.text.strip()) < 50:
+                # CRITICAL: Skip placeholder text like "<List candidate's education background>"
+                is_placeholder = '<' in para_upper and '>' in para_upper and 'CANDIDATE' in para_upper
+                
+                # Process EDUCATION headings (skip only if in first 3 paragraphs AND very short)
+                # This allows education in various template layouts
+                skip_cai = para_idx < 3 and len(paragraph.text.strip()) < 15
+                if is_edu_heading and not is_placeholder and not skip_cai and not self._education_inserted:
                     print(f"  🎓 Found EDUCATION heading at paragraph {para_idx}: '{paragraph.text[:60]}'")
+                    print(f"     _education_inserted flag: {self._education_inserted}")
                     
                     # CRITICAL: Preserve and format the heading text  
                     original_heading = paragraph.text.strip().upper()
@@ -1151,14 +1205,40 @@ class WordFormatter:
                     if not any(h in original_heading for h in ['EDUCATION', 'CERTIFICATE', 'CREDENTIAL', 'ACADEMIC', 'QUALIFICATION']):
                         original_heading = 'EDUCATION'  # Fallback
                     
-                    # Ensure heading is properly formatted
+                    # Ensure heading is properly formatted (BOLD + UNDERLINE)
                     for run in paragraph.runs:
                         run.bold = True
+                        run.underline = True
                         run.font.size = Pt(11)
                     
                     education_data = self.resume_data.get('education', [])
+                    print(f"     Initial education_data from resume_data: {len(education_data) if education_data else 0} entries")
+                    
+                    # ALWAYS get education data from sections if not in structured format
+                    if not education_data:
+                        section_lines = self._find_matching_resume_section('education', self.resume_data.get('sections', {}))
+                        if section_lines:
+                            education_data = self._build_education_from_bullets(section_lines)
+                            print(f"     🔄 Built {len(education_data)} education entries from resume sections")
+                    
+                    # Also check resume_data sections directly
+                    if not education_data:
+                        sections = self.resume_data.get('sections', {})
+                        if 'education' in sections:
+                            edu_text = sections['education']
+                            if isinstance(edu_text, str):
+                                lines = [l.strip() for l in edu_text.split('\n') if l.strip()]
+                                education_data = self._build_education_from_bullets(lines)
+                                print(f"     🔄 Built {len(education_data)} education entries from sections.education text")
+                    
+                    print(f"     📊 Final education_data count: {len(education_data) if education_data else 0}")
+                    
                     if not education_data or len(education_data) == 0:
-                        print(f"     ⚠️  No education data to insert, skipping")
+                        print(f"     ⚠️  No education data available - WILL STILL INSERT HEADING and mark as processed")
+                        # Keep the heading, just don't add content
+                        self._education_inserted = True  # Mark as processed even if no data
+                        replaced_count += 1  # Count this as a processed section
+                        continue  # Skip to next paragraph
                     else:
                         print(f"     → Will insert {len(education_data)} education entries after heading")
                         
@@ -1230,17 +1310,34 @@ class WordFormatter:
                             print(f"     → No instructional text found, clearing existing education content")
                             
                             paras_to_clear = []
-                            for check_idx in range(para_idx + 1, min(para_idx + 50, len(doc.paragraphs))):
+                            # CRITICAL: Only clear template placeholder text, not actual content
+                            # Limit scan range to max 10 paragraphs to prevent clearing employment entries
+                            for check_idx in range(para_idx + 1, min(para_idx + 10, len(doc.paragraphs))):
                                 check_para = doc.paragraphs[check_idx]
-                                check_text = check_para.text.strip().upper()
+                                check_text = check_para.text.strip()
+                                check_text_upper = check_text.upper()
                                 
-                                # Stop if we hit another section heading or end of document
-                                if any(h in check_text for h in ['EMPLOYMENT', 'WORK HISTORY', 'SKILLS', 'SUMMARY', 'CERTIFICATIONS', 'PROJECTS']) and len(check_text) < 50:
+                                # CRITICAL: Stop immediately if we hit SKILLS or any other section
+                                if any(h in check_text_upper for h in ['SKILLS', 'EMPLOYMENT', 'WORK HISTORY', 'SUMMARY', 'CERTIFICATIONS', 'PROJECTS']) and len(check_text) < 50:
                                     print(f"     → Stopped clearing at section: {check_text[:30]}")
                                     break
                                 
-                                # Clear this paragraph (it's old education content)
-                                paras_to_clear.append(check_para)
+                                # CRITICAL: Only clear if it looks like template placeholder text
+                                # Don't clear if it has bullets, dates, or looks like real content
+                                is_placeholder = ('<' in check_text and '>' in check_text) or len(check_text) < 5
+                                has_bullet = check_text.startswith('•') or check_text.startswith('-') or check_text.startswith('*')
+                                has_date = any(char.isdigit() for char in check_text)
+                                
+                                if is_placeholder:
+                                    # Clear obvious placeholders
+                                    paras_to_clear.append(check_para)
+                                elif not has_bullet and not has_date and len(check_text) < 80:
+                                    # Clear short non-content lines (likely template text)
+                                    paras_to_clear.append(check_para)
+                                else:
+                                    # This looks like real content - stop clearing
+                                    print(f"     → Stopped clearing at content: {check_text[:40]}")
+                                    break
                             
                             print(f"     → Clearing {len(paras_to_clear)} old education paragraphs")
                             for p in paras_to_clear:
@@ -1278,60 +1375,68 @@ class WordFormatter:
                 r"<[^>]*qualifications[^>]*>",
                 r"<[^>]*(education|academic)[^>]*>",
                 r"\blist\s*candidate(?:['’]s)?\s*education\s*background\b",
-            ]
-            for edu_pat in edu_patterns:
-                if re.search(edu_pat, paragraph.text, re.IGNORECASE):
-                    # If we detected a primary EDUCATION anchor, avoid replacing placeholders that
-                    # are far away from the anchor (prevents inserting inside EMPLOYMENT region).
-                    if self._primary_anchors.get('EDUCATION') is not None:
-                        anchor_idx = self._primary_anchors.get('EDUCATION')
-                        # Only allow placeholder replacement near or after the anchor
-                        if para_idx < anchor_idx - 2:
-                            print(f"  ⏭️  Skipping education placeholder at {para_idx} (before primary anchor {anchor_idx})")
-                            continue
-                    print(f"  🎓 Found education placeholder in paragraph {para_idx}: '{paragraph.text[:60]}'")
-                    
-                    # Use structured education data (not sections)
-                    education_data = self.resume_data.get('education', [])
-                    
-                    if education_data and len(education_data) > 0:
-                        print(f"     → Will replace with {len(education_data)} education entries")
+                ]
+                for edu_pat in edu_patterns:
+                    if re.search(edu_pat, paragraph.text, re.IGNORECASE):
+                        # If we detected a primary EDUCATION anchor, avoid replacing placeholders that
+                        # are far away from the anchor (prevents inserting inside EMPLOYMENT region).
+                        if self._primary_anchors.get('EDUCATION') is not None:
+                            anchor_idx = self._primary_anchors.get('EDUCATION')
+                            # Only allow placeholder replacement near or after the anchor
+                            if para_idx < anchor_idx - 2:
+                                print(f"  ⏭️  Skipping education placeholder at {para_idx} (before primary anchor {anchor_idx})")
+                                continue
+                        print(f"  🎓 Found education placeholder in paragraph {para_idx}: '{paragraph.text[:60]}'")
                         
-                        # Clear the placeholder paragraph
-                        self._regex_replace_paragraph(paragraph, edu_pat, '')
+                        # Use structured education data (not sections)
+                        education_data = self.resume_data.get('education', [])
                         
-                        # If entries are simple (no institution/details), insert as bullets to match layout
-                        simple_entries = [e for e in education_data if not (e.get('institution') or (e.get('details') or []))]
-                        if simple_entries and len(simple_entries) == len(education_data):
-                            self._insert_education_bullets(doc, paragraph, education_data)  # ALL entries
-                        else:
-                            # Insert properly formatted education blocks
-                            last_element = paragraph
-                            for edu in education_data:  # Insert ALL education entries
-                                block = self._insert_education_block(doc, last_element, edu)
-                                if block:
-                                    last_element = block
+                        if education_data and len(education_data) > 0:
+                            print(f"     → Will replace with {len(education_data)} education entries")
+                            
+                            # CRITICAL: Create EDUCATION heading instead of clearing placeholder
+                            paragraph.clear()
+                            run = paragraph.add_run('EDUCATION')
+                            run.bold = True
+                            run.underline = True  # UNDERLINE
+                            run.font.size = Pt(12)
+                            run.font.all_caps = True  # CAPITAL
+                            paragraph.paragraph_format.space_before = Pt(12)
+                            paragraph.paragraph_format.space_after = Pt(6)
+                            print(f"     ✅ Created EDUCATION heading: BOLD, UNDERLINED, CAPITAL")
+                            
+                            # If entries are simple (no institution/details), insert as bullets to match layout
+                            simple_entries = [e for e in education_data if not (e.get('institution') or (e.get('details') or []))]
+                            if simple_entries and len(simple_entries) == len(education_data):
+                                self._insert_education_bullets(doc, paragraph, education_data)  # ALL entries
+                            else:
+                                # Insert properly formatted education blocks
+                                last_element = paragraph
+                                for edu in education_data:  # Insert ALL education entries
+                                    block = self._insert_education_block(doc, last_element, edu)
+                                    if block:
+                                        last_element = block
                         
-                        # CRITICAL: Set flag to prevent duplicate insertion in _add_sections_content
-                        self._education_inserted = True
-                        
-                        print(f"  ✅ Replaced education placeholder with structured blocks")
-                        replaced_count += 1
-                        break
-                    else:
-                        # Fallback: try to use sections data
-                        content = self._find_matching_resume_section('education', self.resume_data.get('sections', {}))
-                        if content:
-                            bullets = []
-                            for item in content:  # Insert ALL items
-                                if item.strip():
-                                    bullets.append('• ' + item.strip().lstrip('•').strip())
-                            self._regex_replace_paragraph(paragraph, edu_pat, '\n'.join(bullets))
-                            # Set flag even in fallback to prevent duplication
+                            # CRITICAL: Set flag to prevent duplicate insertion in _add_sections_content
                             self._education_inserted = True
-                            print(f"  ✅ Regex replaced education placeholder (fallback)")
+                            
+                            print(f"  ✅ Replaced education placeholder with EDUCATION heading + structured blocks")
                             replaced_count += 1
                             break
+                        else:
+                            # Fallback: try to use sections data
+                            content = self._find_matching_resume_section('education', self.resume_data.get('sections', {}))
+                            if content:
+                                bullets = []
+                                for item in content:  # Insert ALL items
+                                    if item.strip():
+                                        bullets.append('• ' + item.strip().lstrip('•').strip())
+                                self._regex_replace_paragraph(paragraph, edu_pat, '\n'.join(bullets))
+                                # Set flag even in fallback to prevent duplication
+                                self._education_inserted = True
+                                print(f"  ✅ Regex replaced education placeholder (fallback)")
+                                replaced_count += 1
+                                break
         
         print(f"\n Replaced {replaced_count} placeholders in paragraphs")
         
@@ -1360,7 +1465,10 @@ class WordFormatter:
                             r'<[^>]*PAULA[^>]*>',
                         ]
                         for idx, p in enumerate(doc.paragraphs):
-                            if idx < 5:  # Skip CAI CONTACT area
+                            if idx < 10:  # Skip CAI CONTACT area - increased from 5 to 10
+                                continue
+                            # Also skip if in CAI CONTACT section
+                            if idx < 20 and 'CAI CONTACT' in (p.text or '').upper():
                                 continue
                             t = (p.text or '').strip()
                             for pat in name_placeholder_patterns:
@@ -1372,8 +1480,8 @@ class WordFormatter:
                                 break
                 
                     # Strategy: Place SUMMARY right after the candidate name placeholder
-                    if anchor_idx is not None and anchor_idx >= 5 and anchor_idx < len(doc.paragraphs):
-                        # Name anchor found in main content area (not CAI CONTACT)
+                    if anchor_idx is not None and anchor_idx >= 10 and anchor_idx < len(doc.paragraphs):
+                        # Name anchor found in main content area (not CAI CONTACT) - increased from 5 to 10
                         anchor_para = doc.paragraphs[anchor_idx]
                         print(f"  Inserting SUMMARY after candidate name at paragraph {anchor_idx}")
                     else:
@@ -1407,16 +1515,28 @@ class WordFormatter:
                             r.font.size = Pt(11)
                         
                         # Insert summary content below the heading
-                        if summary_text:
-                            # Single paragraph summary
-                            spara = self._insert_paragraph_after(heading, summary_text)
-                            if spara:
-                                for r in spara.runs:
-                                    r.font.size = Pt(10)
-                                print(f"  Inserted SUMMARY heading + paragraph")
-                        elif summary_lines:
-                            # Multiple lines - insert as bullets
-                            self._insert_skills_bullets(doc, heading, summary_lines)
+                        # Convert summary_text to lines if needed
+                        if not summary_lines and summary_text:
+                            lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+                            if len(lines) == 1:
+                                sentences = re.split(r'\.\s+(?=[A-Z])', summary_text)
+                                lines = [s.strip() + ('.' if not s.strip().endswith('.') else '') for s in sentences if s.strip()]
+                            summary_lines = lines
+                        
+                        # Always insert as bullets (no indentation for summary)
+                        if summary_lines:
+                            last_para = heading
+                            for line in summary_lines:
+                                txt = (line or '').strip()
+                                if not txt:
+                                    continue
+                                bullet_para = self._insert_paragraph_after(last_para, '')
+                                if bullet_para:
+                                    # No left indent for summary bullets
+                                    run = bullet_para.add_run('• ' + txt.lstrip('•–—-*● '))
+                                    run.font.size = Pt(10)
+                                    bullet_para.paragraph_format.space_after = Pt(2)
+                                    last_para = bullet_para
                             print(f"  Inserted SUMMARY heading + bullets")
                         
                         self._summary_inserted = True
@@ -1652,6 +1772,10 @@ class WordFormatter:
         if header_footer_replaced > 0:
             print(f"✓ Replaced {header_footer_replaced} placeholders in headers/footers")
         
+        # CLEANUP: Remove excessive empty paragraphs and fix spacing
+        print(f"\n🧹 Cleaning up empty paragraphs and fixing spacing...")
+        self._cleanup_empty_paragraphs(doc)
+        
         # Add sections content
         sections_added = self._add_sections_content(doc)
         print(f"✓ Added {sections_added} sections")
@@ -1702,16 +1826,25 @@ class WordFormatter:
                     para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         except Exception:
             pass
+        
+        # CRITICAL: Verify EDUCATION section is still present before saving
+        if self._education_inserted:
+            education_found = False
+            for para in doc.paragraphs:
+                if 'EDUCATION' in para.text.upper() and len(para.text.strip()) < 50:
+                    education_found = True
+                    print(f"✅ EDUCATION section verified in document before save: '{para.text}'")
+                    break
+            if not education_found:
+                print(f"⚠️  WARNING: EDUCATION section was marked as inserted but not found in document!")
+                print(f"   This indicates the section was deleted during processing.")
+        
         doc.save(output_docx)
         
-        # Post-process with Word COM to handle placeholders inside shapes/text boxes
-        if HAS_WIN32:
-            try:
-                self._postprocess_with_word_com(output_docx)
-            except Exception as e:
-                print(f"⚠️  COM post-processing skipped due to error: {e}")
-        else:
-            print("ℹ️  COM post-processing unavailable (pywin32 not installed)")
+        # DISABLED: COM post-processing was corrupting already-inserted content
+        # The main document is already fully processed by python-docx
+        # COM would only be needed for text boxes/shapes, which we don't use in this template
+        print("ℹ️  Skipping COM post-processing (not needed - content already inserted directly)")
 
         print(f"\n✅ Successfully created formatted document!")
         print(f"📁 Saved to: {output_docx}\n")
@@ -2654,21 +2787,55 @@ class WordFormatter:
             pass
 
     def _clear_instruction_phrases(self, doc):
+        """Remove all instructional text from the template"""
         try:
             phrases = [
                 'PLEASE USE THIS TABLE TO LIST THE SKILLS',
-                'PLEASE LIST THE CANDIDATE’S RELEVANT EMPLOYMENT HISTORY',
                 "PLEASE LIST THE CANDIDATE'S RELEVANT EMPLOYMENT HISTORY",
-                'ADD OR DELETE ROWS AS NECESSARY'
+                'ADD OR DELETE ROWS AS NECESSARY',
+                'INSERT NAME AND CONTACT INFORMATION FOR THE CAI CONTRACT MANAGER',
+                'FOR EASE OF REFERENCE, THE CONTRACT MANAGERS',
+                "CONTRACT MANAGERS' CONTACT INFORMATION APPEARS BELOW",
+                'LISTED ON THE VECTORVMS REQUIREMENT',
+                'SHANNON SWENSON',
+                'SHANNON.SWENSON@CAI.IO',
+                "LIST CANDIDATE'S EDUCATION BACKGROUND",
+                'LIST EDUCATION BACKGROUND',
+                'EDUCATION BACKGROUND'
             ]
+            removed_count = 0
+            paragraphs_to_clear = []
+            
             for p in doc.paragraphs:
                 t = (p.text or '').strip().upper()
+                # Also check for angle bracket patterns
+                if '<' in t and '>' in t:
+                    # Remove angle brackets for comparison
+                    clean_t = t.replace('<', '').replace('>', '')
+                    if any(ph.replace('<', '').replace('>', '') in clean_t for ph in phrases):
+                        paragraphs_to_clear.append(p)
+                        continue
+                    # CRITICAL: Only remove education placeholders if we haven't inserted education yet
+                    # This prevents removing the actual education content we just added
+                    if not self._education_inserted:
+                        if 'CANDIDATE' in clean_t and 'EDUCATION' in clean_t:
+                            paragraphs_to_clear.append(p)
+                            continue
+                
                 if any(ph in t for ph in phrases):
-                    for r in p.runs:
-                        r.text = ''
-        except Exception:
-            pass
-    
+                    paragraphs_to_clear.append(p)
+            
+            # Clear the paragraphs
+            for p in paragraphs_to_clear:
+                for r in p.runs:
+                    r.text = ''
+                removed_count += 1
+            
+            if removed_count > 0:
+                print(f"  ✓ Removed {removed_count} instructional text paragraphs")
+        except Exception as e:
+            print(f"  ⚠️  Error clearing instructions: {e}")
+
     def _build_experience_from_bullets(self, bullets):
         """Best-effort convert raw bullet lines into structured exp list when parser is empty."""
         exps = []
@@ -2874,8 +3041,11 @@ class WordFormatter:
         return search_term.lower() in text.lower()
     
     def _replace_in_paragraph(self, paragraph, search_term, replacement):
-        """Replace text in paragraph while preserving formatting"""
+        """Replace text in paragraph while preserving formatting AND alignment, remove highlighting"""
         replaced = 0
+        
+        # PRESERVE ALIGNMENT: Store original alignment before modification
+        original_alignment = paragraph.alignment
         
         # First try: Replace in individual runs
         for run in paragraph.runs:
@@ -2883,6 +3053,11 @@ class WordFormatter:
                 # Case-insensitive replacement
                 pattern = re.compile(re.escape(search_term), re.IGNORECASE)
                 run.text = pattern.sub(replacement, run.text)
+                # Remove highlighting
+                try:
+                    run.font.highlight_color = None
+                except:
+                    pass
                 replaced += 1
         
         # Second try: If not found in individual runs, text might be split
@@ -2901,17 +3076,34 @@ class WordFormatter:
                 # Add replacement text to first run
                 if paragraph.runs:
                     paragraph.runs[0].text = new_text
+                    # Remove highlighting
+                    try:
+                        paragraph.runs[0].font.highlight_color = None
+                    except:
+                        pass
                     replaced += 1
                 else:
                     # No runs, add new run
-                    paragraph.add_run(new_text)
+                    new_run = paragraph.add_run(new_text)
+                    # Remove highlighting
+                    try:
+                        new_run.font.highlight_color = None
+                    except:
+                        pass
                     replaced += 1
+        
+        # RESTORE ALIGNMENT: Apply original alignment after replacement
+        if original_alignment is not None:
+            paragraph.alignment = original_alignment
         
         return replaced
 
     def _regex_replace_paragraph(self, paragraph, pattern, replacement):
-        """Regex-based replacement across runs: rebuilds paragraph text."""
+        """Regex-based replacement across runs: rebuilds paragraph text, removes highlighting, preserves alignment."""
         try:
+            # PRESERVE ALIGNMENT: Store original alignment before modification
+            original_alignment = paragraph.alignment
+            
             full_text = paragraph.text or ''
             new_text = re.sub(pattern, replacement, full_text, flags=re.IGNORECASE)
             if new_text != full_text:
@@ -2920,8 +3112,24 @@ class WordFormatter:
                     run.text = ''
                 if paragraph.runs:
                     paragraph.runs[0].text = new_text
+                    # CRITICAL: Remove yellow highlighting from name
+                    try:
+                        from docx.enum.text import WD_COLOR_INDEX
+                        paragraph.runs[0].font.highlight_color = None
+                    except:
+                        pass
                 else:
-                    paragraph.add_run(new_text)
+                    new_run = paragraph.add_run(new_text)
+                    # Remove highlighting from new run
+                    try:
+                        from docx.enum.text import WD_COLOR_INDEX
+                        new_run.font.highlight_color = None
+                    except:
+                        pass
+                
+                # RESTORE ALIGNMENT: Apply original alignment after replacement
+                if original_alignment is not None:
+                    paragraph.alignment = original_alignment
         except Exception:
             pass
     
@@ -2943,6 +3151,19 @@ class WordFormatter:
             if not self._summary_inserted and any(marker in para_text for marker in ['SUMMARY', 'OBJECTIVE', 'PROFILE', 'PROFESSIONAL SUMMARY']):
                 summary = (self.resume_data.get('summary') or '').strip()
                 summary_lines = self._find_matching_resume_section('summary', self.resume_data.get('sections', {}))
+                
+                # If summary_lines is empty but summary text exists, split it into bullet points
+                if not summary_lines and summary:
+                    # Split by common delimiters (newlines, periods followed by capital letters, bullet points)
+                    # First try splitting by newlines
+                    lines = [line.strip() for line in summary.split('\n') if line.strip()]
+                    # If only one line, try splitting by sentences
+                    if len(lines) == 1:
+                        # Split by period followed by space and capital letter
+                        sentences = re.split(r'\.\s+(?=[A-Z])', summary)
+                        lines = [s.strip() + ('.' if not s.strip().endswith('.') else '') for s in sentences if s.strip()]
+                    summary_lines = lines
+                
                 if summary or summary_lines:
                     print(f"  ✓ Found SUMMARY at paragraph {para_idx}: '{paragraph.text[:50]}'")
                     
@@ -2957,19 +3178,24 @@ class WordFormatter:
                     # Delete any following content before inserting new
                     self._delete_following_bullets(paragraph, max_scan=20)
                     
-                    # Prefer bullet-style summary if multiple lines available
+                    # Always use bullet-style summary (no indentation for summary)
                     if summary_lines:
-                        self._insert_skills_bullets(doc, paragraph, summary_lines)
-                    else:
-                        summary_para = self._insert_paragraph_after(paragraph, summary)
-                        if summary_para:
-                            for run in summary_para.runs:
+                        last_para = paragraph
+                        for line in summary_lines:
+                            txt = (line or '').strip()
+                            if not txt:
+                                continue
+                            bullet_para = self._insert_paragraph_after(last_para, '')
+                            if bullet_para:
+                                # No left indent for summary bullets
+                                run = bullet_para.add_run('• ' + txt.lstrip('•–—-*● '))
                                 run.font.size = Pt(10)
-                            summary_para.paragraph_format.space_after = Pt(10)
+                                bullet_para.paragraph_format.space_after = Pt(2)
+                                last_para = bullet_para
                     
                     self._summary_inserted = True
                     sections_added += 1
-                    print(f"    → Inserted summary ({len(summary_lines) if summary_lines else len(summary)} items)")
+                    print(f"    → Inserted summary ({len(summary_lines)} bullet points)")
                     continue
                 else:
                     # No summary data: remove heading and any following content until next section
@@ -3031,10 +3257,16 @@ class WordFormatter:
                 if skills and len(skills) > 0:
                     print(f"  ✓ Found SKILLS at paragraph {para_idx}: '{paragraph.text[:50]}'")
                     
-                    # Ensure heading formatting
-                    for run in paragraph.runs:
-                        run.bold = True
-                        run.font.size = Pt(12)
+                    # Ensure heading formatting (BOLD, UNDERLINED, CAPITAL)
+                    paragraph.clear()
+                    run = paragraph.add_run('SKILLS')
+                    run.bold = True
+                    run.underline = True  # UNDERLINE
+                    run.font.size = Pt(12)
+                    run.font.all_caps = True  # CAPITAL
+                    paragraph.paragraph_format.space_before = Pt(12)
+                    paragraph.paragraph_format.space_after = Pt(6)
+                    print(f"    ✅ Formatted SKILLS heading: BOLD, UNDERLINED, CAPITAL")
 
                     # Determine if a table follows this heading
                     node = paragraph._element.getnext()
@@ -3063,20 +3295,42 @@ class WordFormatter:
                     continue
             
             # EDUCATION SECTION - Check multiple variations and handle fallback
-            if not self._education_inserted and any(marker in para_text for marker in ['EDUCATION', 'ACADEMIC BACKGROUND', 'EDUCATIONAL BACKGROUND', 'ACADEMIC QUALIFICATIONS', 'QUALIFICATIONS', 'EDUCATION BACKGROUND', 'ACADEMICS', 'CERTIFICATES', 'CERTIFICATIONS', 'CREDENTIALS', 'EDUCATION/CERTIFICATES', 'EDUCATION / CERTIFICATES']):
+            # CRITICAL: Skip placeholder text like "<List candidate's education background>"
+            is_placeholder = '<' in para_text and '>' in para_text and 'CANDIDATE' in para_text
+            if not self._education_inserted and not is_placeholder and any(marker in para_text for marker in ['EDUCATION', 'ACADEMIC BACKGROUND', 'EDUCATIONAL BACKGROUND', 'ACADEMIC QUALIFICATIONS', 'QUALIFICATIONS', 'EDUCATION BACKGROUND', 'ACADEMICS', 'CERTIFICATES', 'CERTIFICATIONS', 'CREDENTIALS', 'EDUCATION/CERTIFICATES', 'EDUCATION / CERTIFICATES']):
                 education = self.resume_data.get('education', [])
+                print(f"  🔍 Found potential EDUCATION heading at paragraph {para_idx}: '{paragraph.text[:50]}'")
+                print(f"     Initial education count from resume_data: {len(education) if education else 0}")
+                
                 # Fallback priority 1: derive from resume sections (not from template content)
                 if not education:
                     section_lines = self._find_matching_resume_section('education', self.resume_data.get('sections', {}))
                     if section_lines:
                         education = self._build_education_from_bullets(section_lines)
                         print(f"  🔄 Built {len(education)} education entries from resume sections")
+                
+                # Also check sections dict directly
+                if not education:
+                    sections = self.resume_data.get('sections', {})
+                    if 'education' in sections:
+                        edu_text = sections['education']
+                        if isinstance(edu_text, str):
+                            lines = [l.strip() for l in edu_text.split('\n') if l.strip()]
+                            education = self._build_education_from_bullets(lines)
+                            print(f"  🔄 Built {len(education)} education entries from sections.education")
+                        elif isinstance(edu_text, list):
+                            education = self._build_education_from_bullets(edu_text)
+                            print(f"  🔄 Built {len(education)} education entries from sections.education list")
+                
                 # Fallback priority 2: derive from any raw bullets directly under the heading in template (rare)
                 if not education:
                     raw_bullets = self._collect_bullets_after_heading(paragraph, max_scan=80)
                     if raw_bullets:
                         education = self._build_education_from_bullets(raw_bullets)
                         print(f"  🔄 Built {len(education)} education entries from raw bullets under heading")
+                
+                print(f"     📊 Total education entries to insert: {len(education) if education else 0}")
+                
                 if education:
                     print(f"  ✓ Found EDUCATION at paragraph {para_idx}: '{paragraph.text[:50]}'")
                     print(f"  📚 Have {len(education)} education entries to insert")
@@ -3085,13 +3339,16 @@ class WordFormatter:
                     for i, edu in enumerate(education[:3]):
                         print(f"      {i+1}. Degree: '{edu.get('degree', '')[:40]}', Institution: '{edu.get('institution', '')[:30]}', Year: '{edu.get('year', '')}'")
                     
-                    # STEP 1: Clear the heading paragraph (keep only the heading text)
-                    for run in paragraph.runs:
-                        run.text = ''
-                    if paragraph.runs:
-                        paragraph.runs[0].text = 'EDUCATION'
-                        paragraph.runs[0].bold = True
-                        paragraph.runs[0].font.size = Pt(12)
+                    # STEP 1: Clear and reset heading with proper formatting (BOLD, UNDERLINED, CAPITAL)
+                    paragraph.clear()
+                    run = paragraph.add_run('EDUCATION')
+                    run.bold = True
+                    run.underline = True  # UNDERLINE
+                    run.font.size = Pt(12)
+                    run.font.all_caps = True  # CAPITAL
+                    paragraph.paragraph_format.space_before = Pt(12)
+                    paragraph.paragraph_format.space_after = Pt(6)
+                    print(f"    ✅ Created EDUCATION heading: BOLD, UNDERLINED, CAPITAL")
                     
                     # STEP 2: Delete ALL following content (tables + paragraphs)
                     self._delete_following_bullets(paragraph)
@@ -3116,11 +3373,248 @@ class WordFormatter:
                     
                     self._education_inserted = True
                     sections_added += 1
-                    print(f"    → Successfully inserted {inserted_count} education entries")
+                    print(f"    ✅ Successfully inserted {inserted_count} education entries and marked as complete")
+                    continue
+                else:
+                    # No education data but heading exists - REMOVE heading and DON'T mark as processed
+                    # This allows education to be added later when data is available
+                    print(f"  ⚠️  EDUCATION heading found but no data available - removing heading to add later")
+                    self._delete_following_bullets(paragraph, max_scan=50)
+                    self._delete_next_table(paragraph)
+                    self._delete_paragraph(paragraph)
+                    # DO NOT set self._education_inserted = True here!
                     continue
         
+        # FINAL SAFETY NET: If education is STILL not inserted but we have education data, add it at the end
+        if not self._education_inserted:
+            education = self.resume_data.get('education', [])
+            if not education:
+                section_lines = self._find_matching_resume_section('education', self.resume_data.get('sections', {}))
+                if section_lines:
+                    education = self._build_education_from_bullets(section_lines)
+            
+            if not education:
+                sections = self.resume_data.get('sections', {})
+                if 'education' in sections:
+                    edu_text = sections['education']
+                    if isinstance(edu_text, str):
+                        lines = [l.strip() for l in edu_text.split('\n') if l.strip()]
+                        education = self._build_education_from_bullets(lines)
+                    elif isinstance(edu_text, list):
+                        education = self._build_education_from_bullets(edu_text)
+            
+            if education:
+                print(f"\n🚨 SAFETY NET: Education not inserted yet but data exists! Adding after Employment...")
+                print(f"   Have {len(education)} education entries to insert")
+                
+                # Find Employment History section and insert after it
+                employment_idx = None
+                for idx, para in enumerate(doc.paragraphs):
+                    text = para.text.strip().upper()
+                    if any(kw in text for kw in ['EMPLOYMENT HISTORY', 'WORK HISTORY', 'PROFESSIONAL EXPERIENCE', 'EMPLOYMENT']):
+                        if len(text) < 50:
+                            employment_idx = idx
+                            print(f"   📍 Found Employment at paragraph {idx}")
+                            break
+                
+                # Find insertion point after employment content
+                if employment_idx is not None:
+                    # Scan forward to find end of employment section
+                    insertion_idx = employment_idx + 20  # Default
+                    for j in range(employment_idx + 1, min(employment_idx + 100, len(doc.paragraphs))):
+                        next_text = doc.paragraphs[j].text.strip().upper()
+                        if any(kw in next_text for kw in ['SKILLS', 'SUMMARY', 'PROJECTS', 'CERTIFICATIONS']) and len(next_text) < 50:
+                            insertion_idx = j
+                            print(f"   📍 Will insert EDUCATION at paragraph {j}")
+                            break
+                    
+                    anchor_para = doc.paragraphs[insertion_idx] if insertion_idx < len(doc.paragraphs) else doc.paragraphs[-1]
+                else:
+                    # No employment found, use end of document
+                    anchor_para = doc.paragraphs[-1]
+                    print(f"   📍 No Employment found, inserting at end")
+                
+                # Add EDUCATION heading with proper formatting (BOLD, UNDERLINED, CAPITAL)
+                heading_para = self._insert_paragraph_after(anchor_para, '')
+                if heading_para:
+                    heading_para.clear()
+                    run = heading_para.add_run('EDUCATION')
+                    run.bold = True
+                    run.underline = True  # UNDERLINE
+                    run.font.size = Pt(12)
+                    run.font.all_caps = True  # CAPITAL
+                    heading_para.paragraph_format.space_before = Pt(12)
+                    heading_para.paragraph_format.space_after = Pt(6)
+                    print(f"   ✅ Created EDUCATION heading: BOLD, UNDERLINED, CAPITAL")
+                    
+                    # Insert education entries
+                    last_element = heading_para
+                    for edu in education:
+                        block = self._insert_education_block(doc, last_element, edu)
+                        if block:
+                            last_element = block
+                    
+                    self._education_inserted = True
+                    sections_added += 1
+                    print(f"   ✅ SAFETY NET: Successfully added {len(education)} education entries")
+            else:
+                print(f"\n⚠️  Education not inserted and no education data found - marking as processed")
+                self._education_inserted = True
+        
         print(f"\n✅ Section insertion complete. Summary: {self._summary_inserted}, Experience: {self._experience_inserted}, Education: {self._education_inserted}")
+        
+        # NEW: Add missing sections from candidate resume (Skills, Certificates, etc.)
+        sections_added += self._add_missing_sections(doc)
+        
         return sections_added
+    
+    def _add_missing_sections(self, doc):
+        """Add any missing sections from candidate resume that aren't in template.
+        Adds them in order after Education: Skills → Certificates → Projects → Languages
+        """
+        added_count = 0
+        
+        print(f"\n🔍 Checking for missing sections to add...")
+        
+        # Find anchor point: after Education or after Employment
+        anchor_para = None
+        anchor_idx = None
+        
+        # Try to find Education section end
+        for idx, p in enumerate(doc.paragraphs):
+            if 'EDUCATION' in (p.text or '').upper() and len(p.text.strip()) < 50:
+                # Found education heading, scan forward to find end of section
+                for j in range(idx + 1, min(idx + 50, len(doc.paragraphs))):
+                    next_p = doc.paragraphs[j]
+                    next_text = (next_p.text or '').strip().upper()
+                    # Stop at next major section
+                    if any(h in next_text for h in ['SKILLS', 'CERTIFICATES', 'PROJECTS', 'LANGUAGES', 'REFERENCES']) and len(next_text) < 50:
+                        anchor_para = doc.paragraphs[j - 1]
+                        anchor_idx = j - 1
+                        break
+                if anchor_para:
+                    break
+        
+        # Fallback: use Employment History end
+        if not anchor_para and hasattr(self, '_employment_tail_para'):
+            anchor_para = self._employment_tail_para
+            print(f"  Using Employment History tail as anchor")
+        
+        # Fallback: use last paragraph
+        if not anchor_para and doc.paragraphs:
+            anchor_para = doc.paragraphs[-1]
+            print(f"  Using last paragraph as anchor")
+        
+        if not anchor_para:
+            print(f"  ⚠️  No anchor found, skipping missing sections")
+            return 0
+        
+        print(f"  📍 Anchor point found, will add missing sections after it")
+        
+        # Check and add SKILLS if missing
+        if not self._skills_inserted:
+            skills = self.resume_data.get('skills', [])
+            if skills:
+                print(f"  ➕ Adding missing SKILLS section ({len(skills)} skills)")
+                # Add blank line
+                blank = self._insert_paragraph_after(anchor_para, '')
+                if blank:
+                    anchor_para = blank
+                # Add heading
+                heading = self._insert_paragraph_after(anchor_para, 'SKILLS')
+                if heading:
+                    for r in heading.runs:
+                        r.bold = True
+                        r.underline = True
+                        r.font.size = Pt(11)
+                    heading.paragraph_format.space_before = Pt(12)
+                    heading.paragraph_format.space_after = Pt(6)
+                    # Add skills as bullets
+                    self._insert_skills_bullets(doc, heading, skills)
+                    anchor_para = heading
+                    self._skills_inserted = True
+                    added_count += 1
+        
+        # Check and add CERTIFICATES/CERTIFICATIONS if present in resume
+        certificates = []
+        sections = self.resume_data.get('sections', {})
+        for key in ['certificates', 'certifications', 'certification', 'certificate']:
+            if key in sections:
+                cert_data = sections[key]
+                if isinstance(cert_data, str):
+                    certificates = [l.strip() for l in cert_data.split('\n') if l.strip()]
+                elif isinstance(cert_data, list):
+                    certificates = [str(c).strip() for c in cert_data if str(c).strip()]
+                if certificates:
+                    break
+        
+        if certificates:
+            print(f"  ➕ Adding CERTIFICATES section ({len(certificates)} certificates)")
+            # Add blank line
+            blank = self._insert_paragraph_after(anchor_para, '')
+            if blank:
+                anchor_para = blank
+            # Add heading
+            heading = self._insert_paragraph_after(anchor_para, 'CERTIFICATIONS')
+            if heading:
+                for r in heading.runs:
+                    r.bold = True
+                    r.underline = True
+                    r.font.size = Pt(11)
+                heading.paragraph_format.space_before = Pt(12)
+                heading.paragraph_format.space_after = Pt(6)
+                # Add certificates as bullets
+                last_para = heading
+                for cert in certificates:
+                    bullet_para = self._insert_paragraph_after(last_para, '')
+                    if bullet_para:
+                        run = bullet_para.add_run('• ' + cert.lstrip('•–—-*● '))
+                        run.font.size = Pt(10)
+                        bullet_para.paragraph_format.space_after = Pt(2)
+                        bullet_para.paragraph_format.left_indent = Inches(0.25)
+                        last_para = bullet_para
+                anchor_para = last_para
+                added_count += 1
+        
+        # Check and add PROJECTS if present
+        projects = []
+        for key in ['projects', 'project']:
+            if key in sections:
+                proj_data = sections[key]
+                if isinstance(proj_data, str):
+                    projects = [l.strip() for l in proj_data.split('\n') if l.strip()]
+                elif isinstance(proj_data, list):
+                    projects = [str(p).strip() for p in proj_data if str(p).strip()]
+                if projects:
+                    break
+        
+        if projects:
+            print(f"  ➕ Adding PROJECTS section ({len(projects)} projects)")
+            blank = self._insert_paragraph_after(anchor_para, '')
+            if blank:
+                anchor_para = blank
+            heading = self._insert_paragraph_after(anchor_para, 'PROJECTS')
+            if heading:
+                for r in heading.runs:
+                    r.bold = True
+                    r.underline = True
+                    r.font.size = Pt(11)
+                heading.paragraph_format.space_before = Pt(12)
+                heading.paragraph_format.space_after = Pt(6)
+                last_para = heading
+                for proj in projects:
+                    bullet_para = self._insert_paragraph_after(last_para, '')
+                    if bullet_para:
+                        run = bullet_para.add_run('• ' + proj.lstrip('•–—-*● '))
+                        run.font.size = Pt(10)
+                        bullet_para.paragraph_format.space_after = Pt(2)
+                        bullet_para.paragraph_format.left_indent = Inches(0.25)
+                        last_para = bullet_para
+                anchor_para = last_para
+                added_count += 1
+        
+        print(f"  ✅ Added {added_count} missing sections")
+        return added_count
     
     def _detect_table_type(self, table):
         """
@@ -3952,107 +4446,406 @@ class WordFormatter:
     
     def _extract_skills_with_details(self):
         """Extract comprehensive skills with accurate years and last used info.
-        Combines skills from multiple sources: skills section, work experience, and resume sections.
+        Following the detailed pseudocode logic:
+        1. Extract full-sentence comprehensive skill statements from resume
+        2. Calculate YEARS USED from actual job date ranges
+        3. Calculate LAST USED from most recent job using that skill
         """
+        import re
+        from datetime import datetime
+        
         skills_list = []
         
         # Get data from multiple sources
-        skills_raw = self.resume_data.get('skills', [])
         experience = self.resume_data.get('experience', [])
-        resume_sections = self.resume_data.get('sections', {})
+        skills_raw = self.resume_data.get('skills', [])
+        summary = self.resume_data.get('summary', '')
         
-        current_year = 2025
+        current_year = datetime.now().year
         
-        print(f"     🔍 Comprehensive skills extraction:")
-        print(f"        - Raw skills: {len(skills_raw)} entries")
+        print(f"     🔍 Comprehensive skills extraction (following pseudocode logic):")
         print(f"        - Experience entries: {len(experience)} jobs")
-        print(f"        - Resume sections: {len(resume_sections)} sections")
+        print(f"        - Raw skills: {len(skills_raw)} entries")
+        print(f"        - Summary text: {len(str(summary))} chars")
         
-        # Calculate total years of experience first
-        total_years = self._calculate_total_experience_years()
-        print(f"     📊 Total career experience: {total_years} years")
+        # STEP 1: Extract comprehensive skill statements
+        # These are full-sentence descriptions, not keywords
+        comprehensive_skills = self._extract_comprehensive_skills(experience, skills_raw, summary)
         
-        # STEP 1: Extract detailed skill descriptions from work experience
-        detailed_experience_skills = []
-        if experience:
-            detailed_experience_skills = self._extract_comprehensive_skills_from_experience(experience)
+        print(f"     📊 Extracted {len(comprehensive_skills)} comprehensive skill statements")
         
-        # STEP 2: Extract skills from skills sections and convert to detailed descriptions
-        skills_section_descriptions = []
-        if skills_raw:
-            for skill in skills_raw:
-                skill_text = str(skill) if not isinstance(skill, dict) else skill.get('name', str(skill))
-                # Convert simple skills to detailed descriptions
-                detailed_desc = self._convert_simple_skill_to_detailed(skill_text, total_years)
-                if detailed_desc:
-                    skills_section_descriptions.append(detailed_desc)
-        
-        # From skills-related resume sections
-        skills_sections = self._find_matching_resume_section('skills', resume_sections)
-        if skills_sections:
-            for section_content in skills_sections:
-                # Try to extract detailed descriptions from section content
-                section_descriptions = self._extract_detailed_from_section_content(section_content, total_years)
-                skills_section_descriptions.extend(section_descriptions)
-        
-        # STEP 3: Combine and deduplicate skill descriptions
-        all_skill_descriptions = detailed_experience_skills + skills_section_descriptions
-        
-        # Deduplicate based on category and merge similar descriptions
-        unique_descriptions = self._deduplicate_skill_descriptions(all_skill_descriptions)
-        
-        print(f"     ✅ Generated {len(unique_descriptions)} detailed skill descriptions")
-        
-        # STEP 4: Create final skill entries with professional formatting
-        for desc_info in unique_descriptions[:15]:  # Limit to 15 for table readability
-            description = desc_info.get('description', '')
-            category = desc_info.get('category', 'general')
-            years_in_category = desc_info.get('years', 1)
-            end_year = desc_info.get('end_year', current_year)
+        # STEP 2: For each comprehensive skill, calculate years and last used
+        # Following the TRUE LOGIC: count only years where skill was actively used
+        for summary_skill in comprehensive_skills:
+            skill_text = summary_skill['text']
+            skill_keywords = summary_skill['keywords']  # Keywords to match in job descriptions
             
-            # Format years experience professionally
-            if years_in_category >= 8:
-                years_display = "8+"
-            elif years_in_category >= 5:
-                years_display = "5+"
-            elif years_in_category >= 3:
-                years_display = "3+"
-            else:
-                years_display = f"{years_in_category}"
+            # Find all jobs where this skill is present
+            active_years = set()  # Only years where skill was actually used
+            last_used_year = None
             
-            # Handle current/recent usage
-            if end_year >= current_year:
-                last_used_display = str(current_year)
+            for job in experience:
+                if not isinstance(job, dict):
+                    continue
+                    
+                # Check if skill is present in this job
+                if self._skill_is_present(skill_keywords, job):
+                    # Extract year range for this job
+                    start_year, end_year = self._extract_years_from_duration(job.get('duration', ''))
+                    
+                    if start_year and end_year:
+                        # Add all years in this job's range (skill was used throughout)
+                        for year in range(start_year, end_year + 1):
+                            active_years.add(year)
+                        
+                        # Track most recent usage (last job where skill appeared)
+                        if last_used_year is None or end_year > last_used_year:
+                            last_used_year = end_year
+            
+            # Calculate YEARS USED and LAST USED per TRUE LOGIC
+            if active_years:
+                # TRUE LOGIC: Count unique years in the set (not span)
+                # Example: skill used 2015-2017 and 2020-2023 = 7 years, not 9
+                total_years = len(active_years)
+                max_year = max(active_years)
+                
+                # Check if skill is ongoing (used in current year)
+                ongoing = (max_year == current_year)
+                
+                # Format: count of unique years with "+" if ongoing
+                if ongoing:
+                    years_str = f"{total_years}+"
+                    last_str = str(current_year)
+                else:
+                    years_str = str(total_years)
+                    last_str = str(last_used_year) if last_used_year else str(max_year)
             else:
-                last_used_display = str(end_year)
+                # No specific jobs found, use defaults
+                years_str = "2+"
+                last_str = str(current_year)
             
             skills_list.append({
-                'skill': description,
-                'years': years_display,
-                'last_used': last_used_display,
-                'category': category,
-                'total_experience': years_in_category
+                'skill': skill_text,
+                'years': years_str,
+                'last_used': last_str,
+                'keywords': skill_keywords
             })
         
-        # Sort by experience level and category importance
-        category_priority = {
-            'networking': 1, 'fiber_optic': 2, 'cloud': 3, 'database': 4, 
-            'security': 5, 'programming': 6, 'monitoring': 7, 'troubleshooting': 8,
-            'project_management': 9, 'documentation': 10, 'general': 11
-        }
-        
-        skills_list.sort(key=lambda x: (
-            category_priority.get(x.get('category', 'general'), 99),
-            -x.get('total_experience', 0)
-        ))
-        
-        print(f"     ✅ Generated {len(skills_list)} detailed skill entries")
+        print(f"     ✅ Generated {len(skills_list)} detailed skill entries with calculated years")
         if skills_list:
-            print(f"     📋 Top skills by experience:")
-            for i, s in enumerate(skills_list[:5]):
-                print(f"        {i+1}. {s['skill'][:25].ljust(25)} | {s['years'].ljust(8)} | Last: {s['last_used']}")
+            print(f"     📋 Sample skills:")
+            for i, s in enumerate(skills_list[:3]):
+                print(f"        {i+1}. {s['skill'][:60]}... | {s['years']} yrs | Last: {s['last_used']}")
         
         return skills_list
+    
+    def _extract_comprehensive_skills(self, experience, skills_raw, summary):
+        """Extract comprehensive skill statements by synthesizing from all resume sections.
+        Returns list of dicts with 'text' (full sentence) and 'keywords' (for matching).
+        
+        This follows the pseudocode logic: create maximal, non-redundant summaries
+        that describe 'what' was done + 'how' or 'with what'.
+        """
+        import re
+        comprehensive_skills = []
+        
+        # Collect all experience bullets
+        all_bullets = []
+        for exp in experience:
+            if isinstance(exp, dict):
+                details = exp.get('details', [])
+                for detail in details:
+                    if isinstance(detail, str) and len(detail) > 30:
+                        all_bullets.append(detail.strip())
+        
+        print(f"     🔫 Analyzing {len(all_bullets)} experience bullets for comprehensive skills")
+        
+        # STRATEGY: Group bullets by technical domain and synthesize comprehensive statements
+        
+        # 1. NETWORKING INFRASTRUCTURE SKILL
+        networking_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['router', 'switch', 'firewall', 'network', 'vpn', 'wireless', 'lan', 'wan', 'enterprise']):
+                networking_bullets.append(bullet)
+        
+        if networking_bullets:
+            # Extract all networking technologies mentioned
+            all_net_text = ' '.join(networking_bullets).lower()
+            techs = []
+            if 'router' in all_net_text:
+                techs.append('routers')
+            if 'switch' in all_net_text:
+                techs.append('switches')
+            if 'vpn' in all_net_text or 'concentrator' in all_net_text:
+                techs.append('VPN concentrators')
+            if 'firewall' in all_net_text:
+                techs.append('firewalls')
+            if 'wireless' in all_net_text or 'access point' in all_net_text:
+                techs.append('wireless access points')
+            
+            if techs:
+                tech_str = ', '.join(techs)
+                comprehensive_skills.append({
+                    'text': f"Considerable knowledge and hands-on working experience with enterprise {tech_str}",
+                    'keywords': ['network', 'router', 'switch', 'firewall', 'vpn', 'wireless', 'enterprise']
+                })
+        
+        # 2. NETWORK DESIGN & CONFIGURATION SKILL
+        design_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['design', 'install', 'configure', 'local-area', 'wide-area', 'lan', 'wan']):
+                if any(tech in bullet_lower for tech in ['network', 'enterprise', 'infrastructure']):
+                    design_bullets.append(bullet)
+        
+        if design_bullets:
+            comprehensive_skills.append({
+                'text': "Demonstrated and hands-on ability to design, install and configure in local-area and wide-area enterprise networks",
+                'keywords': ['design', 'install', 'configure', 'local-area', 'wide-area', 'lan', 'wan', 'network']
+            })
+        
+        # 3. TROUBLESHOOTING & MAINTENANCE SKILL
+        troubleshoot_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['troubleshoot', 'maintain', 'upgrade', 'configure', 'manage']):
+                if any(term in bullet_lower for term in ['router', 'switch', 'firewall', 'network']):
+                    troubleshoot_bullets.append(bullet)
+        
+        if troubleshoot_bullets:
+            comprehensive_skills.append({
+                'text': "Considerable hands-on working experience configuring, upgrading, managing, maintaining, and troubleshooting routers/switches, and firewalls",
+                'keywords': ['configure', 'upgrade', 'manage', 'maintain', 'troubleshoot', 'router', 'switch', 'firewall']
+            })
+        
+        # 4. FIBER OPTIC SKILL
+        fiber_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['fiber', 'splicing', 'otdr', 'opgw', 'adss', 'optical', 'cable']):
+                fiber_bullets.append(bullet)
+        
+        if fiber_bullets:
+            all_fiber_text = ' '.join(fiber_bullets).lower()
+            
+            # Check for specific fiber technologies
+            fiber_techs = []
+            if 'splicing' in all_fiber_text:
+                fiber_techs.append('Splicing')
+            if 'otdr' in all_fiber_text:
+                fiber_techs.append('Otdr')
+            if 'opgw' in all_fiber_text or 'adss' in all_fiber_text:
+                fiber_techs.append('OPGW & ADSS')
+            
+            if fiber_techs:
+                tech_str = ', '.join(fiber_techs)
+                comprehensive_skills.append({
+                    'text': f"Considerable knowledge of fiber optic systems and hands-on working experience with fiber installation, splicing, and testing equipment with Fiber, {tech_str}",
+                    'keywords': ['fiber', 'splicing', 'otdr', 'opgw', 'adss', 'optical', 'cable']
+                })
+            else:
+                comprehensive_skills.append({
+                    'text': "Considerable hands-on experience engineering and design experience in fiber optic networking industry",
+                    'keywords': ['fiber', 'optical', 'engineering', 'design']
+                })
+        
+        # 5. NETWORK ARCHITECTURE SKILL
+        architecture_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['architect', 'implement', 'scalable', 'fault-tolerant', 'design']):
+                if 'network' in bullet_lower:
+                    architecture_bullets.append(bullet)
+        
+        if architecture_bullets:
+            comprehensive_skills.append({
+                'text': "In-depth experience designing installing and troubleshooting local-area and wide-area enterprise networks",
+                'keywords': ['design', 'install', 'troubleshoot', 'local-area', 'wide-area', 'enterprise', 'network']
+            })
+        
+        # 6. MONITORING & PERFORMANCE SKILL
+        monitoring_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['monitor', 'performance', 'metrics', 'analyze', 'statistics']):
+                monitoring_bullets.append(bullet)
+        
+        if monitoring_bullets:
+            comprehensive_skills.append({
+                'text': "Experience performance tuning, monitoring and collecting statistics metrics collection, and disaster recovery",
+                'keywords': ['performance', 'monitor', 'metrics', 'statistics', 'tuning', 'recovery']
+            })
+        
+        # 7. DOCUMENTATION SKILL
+        doc_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['document', 'record', 'report', 'manual', 'procedure', 'excel', 'gis']):
+                doc_bullets.append(bullet)
+        
+        if doc_bullets:
+            all_doc_text = ' '.join(doc_bullets).lower()
+            tools = []
+            if 'excel' in all_doc_text:
+                tools.append('Excel')
+            if 'gis' in all_doc_text:
+                tools.append('GIS software')
+            if 'bluebeam' in all_doc_text:
+                tools.append('Bluebeam')
+            
+            if tools:
+                tool_str = ', '.join(tools)
+                comprehensive_skills.append({
+                    'text': f"Skilled in updating fiber records, creating documentation using {tool_str}",
+                    'keywords': ['document', 'record', 'excel', 'gis', 'update', 'create']
+                })
+        
+        # 8. CLOUD/DEVOPS SKILL (if present)
+        cloud_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['cloud', 'aws', 'azure', 'docker', 'kubernetes', 'ci/cd', 'devops']):
+                cloud_bullets.append(bullet)
+        
+        if cloud_bullets:
+            all_cloud_text = ' '.join(cloud_bullets).lower()
+            platforms = []
+            if 'aws' in all_cloud_text:
+                platforms.append('AWS')
+            if 'azure' in all_cloud_text:
+                platforms.append('Azure')
+            if 'docker' in all_cloud_text:
+                platforms.append('Docker')
+            if 'kubernetes' in all_cloud_text:
+                platforms.append('Kubernetes')
+            
+            if platforms:
+                platform_str = ', '.join(platforms)
+                comprehensive_skills.append({
+                    'text': f"Experience designing and implementing cloud infrastructure solutions using {platform_str}",
+                    'keywords': ['cloud', 'aws', 'azure', 'docker', 'kubernetes', 'infrastructure']
+                })
+        
+        # 9. DATABASE SKILL (if present)
+        db_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['database', 'sql', 'mysql', 'postgresql', 'oracle', 'mongodb']):
+                db_bullets.append(bullet)
+        
+        if db_bullets:
+            comprehensive_skills.append({
+                'text': "Experience designing, installing and configuring database systems with performance monitoring and optimization",
+                'keywords': ['database', 'sql', 'mysql', 'postgresql', 'configure', 'performance']
+            })
+        
+        # 10. SECURITY/COMPLIANCE SKILL (if present)
+        security_bullets = []
+        for bullet in all_bullets:
+            bullet_lower = bullet.lower()
+            if any(term in bullet_lower for term in ['security', 'compliance', 'policy', 'standard', 'authentication']):
+                security_bullets.append(bullet)
+        
+        if security_bullets:
+            comprehensive_skills.append({
+                'text': "Experience creating environments for compliance with networking security architecture policies, and standards",
+                'keywords': ['security', 'compliance', 'policy', 'standard', 'architecture']
+            })
+        
+        # If we found very few skills, add some generic ones from summary or skills section
+        if len(comprehensive_skills) < 3 and skills_raw:
+            for skill in skills_raw[:5]:
+                skill_text = str(skill) if not isinstance(skill, str) else skill
+                if len(skill_text) > 5:
+                    comprehensive_skills.append({
+                        'text': f"Experience with {skill_text}",
+                        'keywords': skill_text.lower().split()[:3]
+                    })
+        
+        print(f"     ✅ Synthesized {len(comprehensive_skills)} comprehensive skill statements")
+        for i, skill in enumerate(comprehensive_skills[:5]):
+            print(f"        {i+1}. {skill['text'][:70]}...")
+        
+        return comprehensive_skills
+    
+    def _skill_is_present(self, skill_keywords, job):
+        """Check if skill is present in job description using semantic matching.
+        
+        Args:
+            skill_keywords: List of keywords that indicate this skill
+            job: Job dict with 'role', 'company', 'details', etc.
+        
+        Returns:
+            True if skill is clearly present in job context
+        """
+        # Combine all job text
+        role = job.get('role', '')
+        company = job.get('company', '')
+        details = job.get('details', [])
+        
+        job_text = f"{role} {company} " + ' '.join([str(d) for d in details])
+        job_text_lower = job_text.lower()
+        
+        # Synonym mapping for better semantic matching
+        synonyms = {
+            'network': ['network', 'networking', 'lan', 'wan', 'infrastructure'],
+            'router': ['router', 'routers', 'routing'],
+            'switch': ['switch', 'switches', 'switching'],
+            'firewall': ['firewall', 'firewalls', 'security'],
+            'configure': ['configure', 'configuration', 'configuring', 'setup', 'set up'],
+            'troubleshoot': ['troubleshoot', 'troubleshooting', 'debug', 'diagnose', 'fix', 'resolve'],
+            'maintain': ['maintain', 'maintenance', 'maintaining', 'support'],
+            'monitor': ['monitor', 'monitoring', 'track', 'tracking', 'observe'],
+            'design': ['design', 'designing', 'architect', 'architecture', 'plan', 'planning'],
+            'install': ['install', 'installation', 'installing', 'deploy', 'deployment'],
+            'fiber': ['fiber', 'fibre', 'optical', 'optic'],
+            'splicing': ['splicing', 'splice', 'fusion'],
+            'document': ['document', 'documentation', 'documenting', 'record', 'recording'],
+            'manage': ['manage', 'managing', 'management', 'administer', 'administering'],
+            'upgrade': ['upgrade', 'upgrading', 'update', 'updating']
+        }
+        
+        # Check if any keyword or its synonyms appear in job text
+        matches = 0
+        matched_keywords = []
+        
+        for keyword in skill_keywords:
+            keyword_lower = keyword.lower()
+            
+            # Direct match
+            if keyword_lower in job_text_lower:
+                matches += 1
+                matched_keywords.append(keyword)
+                continue
+            
+            # Check synonyms
+            if keyword_lower in synonyms:
+                for syn in synonyms[keyword_lower]:
+                    if syn in job_text_lower:
+                        matches += 1
+                        matched_keywords.append(keyword)
+                        break
+        
+        # Matching criteria:
+        # - 2+ keyword matches = strong confidence
+        # - 1 specific technical term = medium confidence
+        # - 1 generic term = weak, need more context
+        
+        if matches >= 2:
+            return True
+        elif matches == 1:
+            # Check if it's a specific technical term (not generic)
+            specific_terms = ['router', 'switch', 'firewall', 'fiber', 'otdr', 'splicing', 
+                            'aws', 'azure', 'docker', 'kubernetes', 'database', 'sql',
+                            'cisco', 'juniper', 'vpn', 'wireless', 'gis', 'excel',
+                            'cloud', 'security', 'optical']
+            
+            for keyword in matched_keywords:
+                if keyword.lower() in specific_terms:
+                    return True
+        
+        return False
     
     def _extract_comprehensive_skills_from_experience(self, experience):
         """Extract detailed skill descriptions from work experience to match professional format"""
@@ -4583,11 +5376,16 @@ class WordFormatter:
         existing_sections = {}
         
         # Scan all paragraphs for section headings
+        print(f"    🔍 Scanning {len(doc.paragraphs)} paragraphs for existing sections...")
         for para_idx, paragraph in enumerate(doc.paragraphs):
             para_text = paragraph.text.strip().upper()
             
             # Skip empty or very long paragraphs (likely content, not headings)
-            if not para_text or len(para_text) > 100:
+            if not para_text:
+                continue
+            if len(para_text) > 100:
+                if para_idx < 25:  # Debug first 25 paragraphs
+                    print(f"       Para {para_idx}: Too long ({len(para_text)} chars): '{para_text[:50]}...'")
                 continue
             
             # Check for section headings with various patterns
@@ -4621,6 +5419,19 @@ class WordFormatter:
                 if 'SKILLS_TABLE' not in existing_sections:
                     existing_sections['SKILLS_TABLE'] = table_position
                     print(f"    🔍 Found SKILLS_TABLE at position {table_position}")
+        
+        # CRITICAL FIX: Force-check for EDUCATION near EMPLOYMENT (common template pattern)
+        if 'EDUCATION' not in existing_sections and 'EMPLOYMENT' in existing_sections:
+            employment_idx = existing_sections['EMPLOYMENT']
+            # Check 5 paragraphs after EMPLOYMENT for EDUCATION heading
+            for offset in range(1, 6):
+                check_idx = employment_idx + offset
+                if check_idx < len(doc.paragraphs):
+                    check_text = doc.paragraphs[check_idx].text.strip().upper()
+                    if 'EDUCATION' in check_text and len(check_text) < 300:  # Allow longer text for templates
+                        existing_sections['EDUCATION'] = check_idx
+                        print(f"    🔍 Found EDUCATION section at paragraph {check_idx}: '{check_text[:50]}' (detected after EMPLOYMENT)")
+                        break
         
         return existing_sections
     
@@ -4764,8 +5575,30 @@ class WordFormatter:
                 insertion_point += 5  # Experience takes more space
     
     def _find_optimal_insertion_point(self, doc):
-        """Find the best place to insert missing sections"""
-        # Look for skills tables first
+        """Find the best place to insert missing sections - AFTER Employment History"""
+        # PRIORITY 1: Find EMPLOYMENT HISTORY section and insert after it
+        employment_end = None
+        for para_idx, para in enumerate(doc.paragraphs):
+            text = para.text.strip().upper()
+            if any(keyword in text for keyword in ['EMPLOYMENT HISTORY', 'WORK HISTORY', 'PROFESSIONAL EXPERIENCE', 'WORK EXPERIENCE', 'EMPLOYMENT']):
+                if len(text) < 50:  # Likely a heading
+                    # Scan forward to find the end of employment section
+                    for j in range(para_idx + 1, min(para_idx + 100, len(doc.paragraphs))):
+                        next_text = doc.paragraphs[j].text.strip().upper()
+                        # Stop at next major section
+                        if any(kw in next_text for kw in ['EDUCATION', 'SKILLS', 'SUMMARY', 'PROJECTS', 'CERTIFICATIONS']) and len(next_text) < 50:
+                            employment_end = j
+                            print(f"  📍 Found Employment end at paragraph {j}, will insert EDUCATION here")
+                            break
+                    # If no next section found, use some paragraphs after employment heading
+                    if not employment_end:
+                        employment_end = para_idx + 20
+                    break
+        
+        if employment_end:
+            return employment_end
+        
+        # PRIORITY 2: Look for skills tables
         skills_table_end = None
         for table_idx, table in enumerate(doc.tables):
             if self._is_skills_table(table):
@@ -4778,7 +5611,7 @@ class WordFormatter:
         if skills_table_end:
             return skills_table_end
         
-        # Otherwise, find after the last major section
+        # PRIORITY 3: Find after the last major section
         last_major_section = 0
         for para_idx, para in enumerate(doc.paragraphs):
             text = para.text.strip().upper()
@@ -4794,34 +5627,79 @@ class WordFormatter:
             # Insert EDUCATION heading
             if insertion_point < len(doc.paragraphs):
                 anchor_para = doc.paragraphs[insertion_point]
-                heading = self._insert_paragraph_after(anchor_para, 'EDUCATION')
+                heading = self._insert_paragraph_after(anchor_para, '')
             else:
-                heading = doc.add_paragraph('EDUCATION')
+                heading = doc.add_paragraph('')
             
-            # Format heading
-            for run in heading.runs:
+            # CRITICAL: Ensure heading has content and formatting (BOLD + UNDERLINE + CAPS)
+            if heading:
+                # Clear any existing content
+                heading.clear()
+                # Add EDUCATION text with proper formatting
+                run = heading.add_run('EDUCATION')
                 run.bold = True
+                run.underline = True
                 run.font.size = Pt(12)
+                heading.paragraph_format.space_before = Pt(12)
+                heading.paragraph_format.space_after = Pt(6)
+                print(f"    📝 Created EDUCATION heading at insertion point {insertion_point}")
             
             # Insert education content
             education_data = self.resume_data.get('education', [])
             if not education_data:
                 education_data = self._ensure_education_completeness()
             
-            if education_data:
+            if education_data and heading:
                 last_element = heading
                 for edu in education_data:  # Insert ALL education entries
                     edu_block = self._insert_education_block(doc, last_element, edu)
                     if edu_block:
                         last_element = edu_block
                 
-                print(f"    ✅ Added EDUCATION section with {len(education_data)} entries")
+                print(f"    ✅ Added EDUCATION section with {len(education_data)} entries at paragraph {insertion_point}")
+                print(f"    📍 EDUCATION heading text: '{heading.text if heading else 'NO HEADING'}'")
+                print(f"    📍 Total paragraphs in document now: {len(doc.paragraphs)}")
             
             # Update anchors to reflect new section
             self._primary_anchors['EDUCATION'] = insertion_point
             
+            # Mark as inserted to prevent duplication
+            self._education_inserted = True
+            
+            # CRITICAL: Add to protected sections to prevent cleanup deletion
+            if not hasattr(self, '_protected_sections'):
+                self._protected_sections = []
+            self._protected_sections.append('EDUCATION')
+            
+            # Mark paragraph range as protected
+            if not hasattr(self, '_protected_ranges'):
+                self._protected_ranges = []
+            
+            # CRITICAL FIX: Get actual paragraph indices AFTER insertion
+            # Find the EDUCATION heading we just inserted (use LAST occurrence if multiple)
+            education_start_idx = None
+            print(f"    🔍 Searching for EDUCATION heading in {len(doc.paragraphs)} paragraphs...")
+            
+            for idx, para in enumerate(doc.paragraphs):
+                text = (para.text or '').strip().upper()
+                if 'EDUCATION' == text or (text.startswith('EDUCATION') and len(text) < 50):
+                    education_start_idx = idx  # Keep updating to get LAST occurrence
+                    print(f"    📍 Found EDUCATION at paragraph {idx}: '{para.text[:50]}'")
+            
+            if education_start_idx is not None:
+                education_end_idx = min(education_start_idx + 15, len(doc.paragraphs))
+                self._protected_ranges.append((education_start_idx, education_end_idx))
+                print(f"    🔒 EDUCATION section locked and protected (paras {education_start_idx}-{education_end_idx})")
+            else:
+                print(f"    ⚠️  Could not find EDUCATION heading to protect!")
+                print(f"    🔍 Paragraph texts:")
+                for idx, para in enumerate(doc.paragraphs[-10:]):  # Show last 10
+                    print(f"        Para {len(doc.paragraphs) - 10 + idx}: '{para.text[:60]}'")
+            
         except Exception as e:
             print(f"    ⚠️  Error adding EDUCATION section: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _insert_skills_section_at_point(self, doc, insertion_point):
         """Insert skills section at specific point in document"""
@@ -4833,9 +5711,10 @@ class WordFormatter:
             else:
                 heading = doc.add_paragraph('SKILLS')
             
-            # Format heading
+            # Format heading (BOLD + UNDERLINE)
             for run in heading.runs:
                 run.bold = True
+                run.underline = True
                 run.font.size = Pt(12)
             
             # Insert skills content
@@ -4846,6 +5725,9 @@ class WordFormatter:
             
             # Update anchors
             self._primary_anchors['SKILLS'] = insertion_point
+            
+            # Mark as inserted to prevent duplication
+            self._skills_inserted = True
             
         except Exception as e:
             print(f"    ⚠️  Error adding SKILLS section: {e}")
@@ -4878,6 +5760,9 @@ class WordFormatter:
             
             # Update anchors
             self._primary_anchors['EMPLOYMENT'] = insertion_point
+            
+            # Mark as inserted to prevent duplication
+            self._experience_inserted = True
             
         except Exception as e:
             print(f"    ⚠️  Error adding EMPLOYMENT HISTORY section: {e}")
@@ -5217,9 +6102,80 @@ class WordFormatter:
         
         return False
     
+    def _cleanup_empty_paragraphs(self, doc):
+        """Remove excessive empty paragraphs between sections and normalize spacing"""
+        removed_count = 0
+        section_headings = ['SUMMARY', 'EMPLOYMENT', 'WORK HISTORY', 'EXPERIENCE', 'EDUCATION', 
+                          'SKILLS', 'TECHNICAL SKILLS', 'CERTIFICATIONS', 'PROJECTS', 'LANGUAGES']
+        
+        try:
+            # Build set of protected paragraph indices
+            protected_indices = set()
+            
+            # Protect sections by name
+            if hasattr(self, '_protected_sections'):
+                for idx, para in enumerate(doc.paragraphs):
+                    text = (para.text or '').strip().upper()
+                    for section in self._protected_sections:
+                        if section.upper() in text and len(text) < 50:
+                            # Protect this paragraph and next 10
+                            for j in range(idx, min(idx + 10, len(doc.paragraphs))):
+                                protected_indices.add(j)
+                            break
+            
+            # Protect specific ranges
+            if hasattr(self, '_protected_ranges'):
+                for start, end in self._protected_ranges:
+                    for j in range(start, min(end, len(doc.paragraphs))):
+                        protected_indices.add(j)
+            
+            paragraphs_to_remove = []
+            prev_was_empty = False
+            prev_was_section = False
+            
+            for idx, para in enumerate(doc.paragraphs):
+                # Skip protected paragraphs
+                if idx in protected_indices:
+                    prev_was_empty = False
+                    prev_was_section = False
+                    continue
+                
+                text = (para.text or '').strip()
+                is_empty = not text
+                is_section = any(h in text.upper() for h in section_headings) and len(text) < 50
+                
+                # Remove multiple consecutive empty paragraphs (keep only one for spacing)
+                if is_empty:
+                    if prev_was_empty or prev_was_section:
+                        paragraphs_to_remove.append(para)
+                        removed_count += 1
+                    prev_was_empty = True
+                else:
+                    prev_was_empty = False
+                
+                # Track section headings
+                if is_section:
+                    prev_was_section = True
+                    # Normalize section heading spacing
+                    para.paragraph_format.space_before = Pt(12)
+                    para.paragraph_format.space_after = Pt(6)
+                else:
+                    prev_was_section = False
+            
+            # Remove marked paragraphs
+            for para in paragraphs_to_remove:
+                self._delete_paragraph(para)
+            
+            if protected_indices:
+                print(f"  Protected {len(protected_indices)} paragraphs from cleanup")
+            print(f"  Removed {removed_count} excessive empty paragraphs")
+            
+        except Exception as e:
+            print(f"  Cleanup error: {e}")
+    
     def _verify_complete_content_preservation(self):
         """Verify that all candidate resume content has been preserved"""
-        print(f"    🔍 Verifying complete content preservation...")
+        print(f"    Verifying complete content preservation...")
         
         # Count original content lines
         original_lines = 0
@@ -5236,8 +6192,8 @@ class WordFormatter:
         original_lines += len(self.resume_data.get('education', []))
         original_lines += len(self.resume_data.get('skills', []))
         
-        print(f"    📊 Original resume content lines: {original_lines}")
-        print(f"    ✅ Content preservation verification complete")
+        print(f"    Original resume content lines: {original_lines}")
+        print(f"    Content preservation verification complete")
     
     def _convert_to_pdf(self, docx_path, pdf_path):
         """Convert DOCX to PDF"""

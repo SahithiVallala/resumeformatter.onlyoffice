@@ -1037,9 +1037,40 @@ class ResumeParser:
         # For lines with multiple skills separated by delimiters
         individual_skills = []
         
-        # Split on common separators
-        if ',' in line_clean:
-            # Handle comma-separated skills
+        # Smart split function that respects parentheses
+        def smart_split(text, delimiter):
+            """Split on delimiter but not inside parentheses"""
+            parts = []
+            current = []
+            paren_depth = 0
+            
+            for char in text:
+                if char == '(':
+                    paren_depth += 1
+                    current.append(char)
+                elif char == ')':
+                    paren_depth -= 1
+                    current.append(char)
+                elif char == delimiter and paren_depth == 0:
+                    # Split here
+                    parts.append(''.join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            
+            # Add last part
+            if current:
+                parts.append(''.join(current).strip())
+            
+            return parts
+        
+        # Split on common separators (respecting parentheses)
+        if ',' in line_clean and '(' in line_clean:
+            # Has commas AND parentheses - use smart split
+            parts = smart_split(line_clean, ',')
+            individual_skills.extend(p for p in parts if p and len(p) > 2)
+        elif ',' in line_clean:
+            # Simple comma split (no parentheses)
             parts = [p.strip() for p in line_clean.split(',')]
             individual_skills.extend(p for p in parts if p and len(p) > 2)
         elif ';' in line_clean:

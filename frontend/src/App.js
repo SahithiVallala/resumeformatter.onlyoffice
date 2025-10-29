@@ -11,6 +11,22 @@ function App() {
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [results, setResults] = useState([]);
   const [isFormatting, setIsFormatting] = useState(false);
+  const [darkMode, setDarkMode] = useState(false);
+
+  // Load dark mode from localStorage
+  useEffect(() => {
+    const savedDarkMode = localStorage.getItem('darkMode');
+    if (savedDarkMode) {
+      setDarkMode(JSON.parse(savedDarkMode));
+    }
+  }, []);
+
+  // Toggle dark mode
+  const toggleDarkMode = () => {
+    const newMode = !darkMode;
+    setDarkMode(newMode);
+    localStorage.setItem('darkMode', JSON.stringify(newMode));
+  };
 
   const fetchTemplates = async () => {
     try {
@@ -73,14 +89,19 @@ function App() {
   ];
 
   return (
-    <div className="App">
+    <div className={`App ${darkMode ? 'dark-mode' : ''}`}>
       <header className="header">
         <div className="header-content">
           <div className="logo">
             <span className="logo-icon">✨</span>
             <h1>Resume Formatter Pro</h1>
           </div>
-          <p className="tagline">Transform Your Resumes with Professional Templates</p>
+          <div className="header-actions">
+            <p className="tagline">Transform Your Resumes with Professional Templates</p>
+            <button className="dark-mode-toggle" onClick={toggleDarkMode} title={darkMode ? 'Light Mode' : 'Dark Mode'}>
+              {darkMode ? '☀️' : '🌙'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -95,6 +116,7 @@ function App() {
               onSelect={handleTemplateSelect}
               onDelete={handleTemplateDelete}
               onUpload={handleTemplateUpload}
+              darkMode={darkMode}
             />
           )}
 

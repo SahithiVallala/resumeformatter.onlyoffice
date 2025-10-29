@@ -8,6 +8,11 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
   const [caiContact, setCaiContact] = useState({ name: '', phone: '', email: '' });
   const [showCaiEditor, setShowCaiEditor] = useState(false);
   const [savingCai, setSavingCai] = useState(false);
+  const [fileStatuses, setFileStatuses] = useState({});
+  const [showHelp, setShowHelp] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const selectedTemplateData = templates.find(t => t.id === selectedTemplate);
 
@@ -26,8 +31,14 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
   }, []);
 
   const handleFileSelect = (e) => {
-    const selectedFiles = Array.from(e.target.files);
-    setFiles(prev => [...prev, ...selectedFiles]);
+    const newFiles = Array.from(e.target.files);
+    setFiles(prev => [...prev, ...newFiles]);
+    // Set initial status for each file
+    const newStatuses = {};
+    newFiles.forEach((file, idx) => {
+      newStatuses[files.length + idx] = { status: 'ready', message: 'Ready to format' };
+    });
+    setFileStatuses(prev => ({ ...prev, ...newStatuses }));
   };
 
   const handleDragOver = (e) => {
@@ -44,6 +55,15 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
     setIsDragging(false);
     const droppedFiles = Array.from(e.dataTransfer.files);
     setFiles(prev => [...prev, ...droppedFiles]);
+    // Set initial status for each file
+    const newStatuses = {};
+    droppedFiles.forEach((file, idx) => {
+      newStatuses[files.length + idx] = { status: 'ready', message: 'Ready to format' };
+    });
+    setFileStatuses(prev => ({ ...prev, ...newStatuses }));
+    // Show AI detection banner
+    setIsProcessing(true);
+    setTimeout(() => setIsProcessing(false), 2000);
   };
 
   const removeFile = (index) => {
@@ -137,6 +157,31 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
         </button>
       </div>
 
+      {/* AI Smart Detection Banner */}
+      {isProcessing && (
+        <div className="ai-detection-banner">
+          <span className="ai-icon">✨</span>
+          <span>Smart Skill Extraction in progress… we'll analyze and optimize resumes automatically using AI.</span>
+        </div>
+      )}
+
+      {/* Help Tooltip */}
+      <div className="help-section">
+        <button className="help-btn" onClick={() => setShowHelp(!showHelp)} title="Need Assistance?">
+          ℹ️ Help
+        </button>
+        {showHelp && (
+          <div className="help-tooltip">
+            <h4>📋 Upload Guide</h4>
+            <ul>
+              <li><strong>Formats:</strong> PDF, DOCX</li>
+              <li><strong>Limit:</strong> Up to 100 resumes</li>
+              <li><strong>Processing:</strong> ~30 seconds per resume</li>
+            </ul>
+          </div>
+        )}
+      </div>
+
       <div
         className={`dropzone ${isDragging ? 'dragging' : ''}`}
         onDragOver={handleDragOver}
@@ -145,11 +190,15 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
         onClick={() => document.getElementById('file-upload').click()}
       >
         <div className="dropzone-content">
-          <div className="upload-icon">📁</div>
+          <div className="upload-icons">
+            <span className="file-icon">📄</span>
+            <span className="file-icon">📝</span>
+          </div>
           <h3>Drag & Drop Resume Files Here</h3>
-          <p>or click to browse your computer</p>
+          <p>Drop up to 100 resumes here or click to browse</p>
           <div className="supported-formats">
-            <span>Supports: PDF, DOCX</span>
+            <span className="format-badge">📄 PDF</span>
+            <span className="format-badge">📝 DOCX</span>
           </div>
         </div>
         <input
@@ -163,30 +212,93 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
       </div>
 
       {files.length > 0 && (
-        <div className="uploaded-files">
-          <div className="files-header">
-            <h3>📋 Uploaded Files ({files.length})</h3>
-            <button className="clear-all-btn" onClick={() => setFiles([])}>
-              Clear All
+        <>
+          {/* Batch Actions Toolbar */}
+          <div className="batch-toolbar">
+            <button className="toolbar-btn" onClick={() => {
+              if (selectedFiles.length === files.length) {
+                setSelectedFiles([]);
+              } else {
+                setSelectedFiles(files.map((_, i) => i));
+              }
+            }}>
+              {selectedFiles.length === files.length ? '☐' : '☑'} Select All
             </button>
+            <button 
+              className="toolbar-btn" 
+              disabled={selectedFiles.length === 0}
+              onClick={() => {
+                setFiles(prev => prev.filter((_, i) => !selectedFiles.includes(i)));
+                setSelectedFiles([]);
+              }}
+            >
+              🗑️ Remove Selected
+            </button>
+            <div className="toolbar-spacer"></div>
+            <div className="upload-progress-text">
+              Processing {uploadProgress}% complete
+            </div>
           </div>
-          <div className="files-list">
-            {files.map((file, index) => (
-              <div key={index} className="file-item">
-                <div className="file-icon">
-                  {file.name.endsWith('.pdf') ? '📄' : '📝'}
-                </div>
-                <div className="file-details">
-                  <div className="file-name">{file.name}</div>
-                  <div className="file-size">{(file.size / 1024).toFixed(2)} KB</div>
-                </div>
-                <button className="remove-file-btn" onClick={() => removeFile(index)}>
-                  ×
-                </button>
-              </div>
-            ))}
+
+          <div className="uploaded-files">
+            <div className="files-header">
+              <h3>📋 Uploaded Files ({files.length})</h3>
+              <button className="clear-all-btn" onClick={() => { setFiles([]); setSelectedFiles([]); }}>
+                Clear All
+              </button>
+            </div>
+            <div className="files-list">
+              {files.map((file, index) => {
+                const status = fileStatuses[index] || { status: 'ready', message: 'Ready' };
+                const statusIcon = {
+                  'ready': '🟢',
+                  'processing': '🟡',
+                  'success': '✅',
+                  'error': '🔴'
+                }[status.status] || '🟢';
+
+                return (
+                  <div 
+                    key={index} 
+                    className={`file-item ${selectedFiles.includes(index) ? 'selected' : ''}`}
+                    onClick={() => {
+                      if (selectedFiles.includes(index)) {
+                        setSelectedFiles(prev => prev.filter(i => i !== index));
+                      } else {
+                        setSelectedFiles(prev => [...prev, index]);
+                      }
+                    }}
+                  >
+                    <div className="file-checkbox">
+                      <input 
+                        type="checkbox" 
+                        checked={selectedFiles.includes(index)}
+                        onChange={() => {}}
+                      />
+                    </div>
+                    <div className="file-icon">
+                      {file.name.endsWith('.pdf') ? '📄' : '📝'}
+                    </div>
+                    <div className="file-details">
+                      <div className="file-name">{file.name}</div>
+                      <div className="file-meta">
+                        <span className="file-size">{(file.size / 1024).toFixed(2)} KB</span>
+                        <span className="file-type">{file.name.endsWith('.pdf') ? 'PDF' : 'DOCX'}</span>
+                      </div>
+                      <div className="file-status">
+                        <span className="status-icon">{statusIcon}</span>
+                        <span className="status-text">{status.message}</span>
+                      </div>
+                    </div>
+                    <button className="remove-file-btn" onClick={(e) => { e.stopPropagation(); removeFile(index); }}>
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       <div className="action-buttons">
@@ -194,7 +306,7 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
           ← Back to Templates
         </button>
         <button
-          className="btn-format"
+          className={`btn-format ${files.length > 0 ? 'active' : ''}`}
           onClick={handleFormat}
           disabled={isFormatting || files.length === 0}
         >
@@ -205,7 +317,7 @@ const ResumeUploadPhase = ({ selectedTemplate, templates, onFormatSuccess, onBac
             </>
           ) : (
             <>
-              ✨ Format {files.length} Resume{files.length !== 1 ? 's' : ''}
+              ✨ Format {files.length === 0 ? '0 Resumes' : `${files.length} Resume${files.length !== 1 ? 's' : ''}`}
             </>
           )}
         </button>
