@@ -15,6 +15,14 @@ from datetime import datetime
 from collections import defaultdict
 import os
 
+# Import intelligent parser for smart section mapping
+try:
+    from utils.intelligent_resume_parser import get_intelligent_parser
+    INTELLIGENT_PARSER_AVAILABLE = True
+except ImportError:
+    INTELLIGENT_PARSER_AVAILABLE = False
+    print("⚠️  Intelligent parser not available, using basic matching")
+
 class ResumeParser:
     """Comprehensive resume parsing"""
     
@@ -23,6 +31,16 @@ class ResumeParser:
         self.file_type = file_type
         self.raw_text = ""
         self.lines = []
+        
+        # Initialize intelligent parser if available
+        self.intelligent_parser = None
+        if INTELLIGENT_PARSER_AVAILABLE:
+            try:
+                self.intelligent_parser = get_intelligent_parser()
+                print("✅ Using intelligent section mapper")
+            except Exception as e:
+                print(f"⚠️  Failed to load intelligent parser: {e}")
+                self.intelligent_parser = None
         
     def parse(self):
         """Main parsing method"""
@@ -229,10 +247,63 @@ class ResumeParser:
     
     def _extract_summary(self):
         """Extract professional summary/objective - with or without explicit heading."""
-        summary_keywords = ['summary', 'objective', 'profile', 'about', 'professional summary']
+        summary_keywords = ['summary', 'objective', 'profile', 'about']
         
-        # METHOD 1: Look for explicit summary section heading
-        for i, line in enumerate(self.lines):
+        # METHOD 1: Detect certification line + summary paragraph pattern (PRIORITY)
+        # This should be checked FIRST because it's more specific and reliable
+        # Pattern: "PMP | Certified Scrum Master | Agile Practitioner" followed by summary paragraph
+        for i, line in enumerate(self.lines[:15]):
+            line_lower = line.lower()
+            
+            # Check if this line looks like a certifications line (short, has cert keywords, has |)
+            cert_keywords = ['pmp', 'certified', 'scrum', 'agile', 'practitioner', 'professional']
+            has_cert_keywords = sum(1 for kw in cert_keywords if kw in line_lower) >= 2
+            has_pipes = line.count('|') >= 1
+            is_short = len(line) < 150
+            
+            if has_cert_keywords and has_pipes and is_short:
+                # This looks like a certification line
+                # Check if next line is a summary paragraph
+                if i + 1 < len(self.lines):
+                    next_line = self.lines[i + 1].strip()
+                    
+                    # Check if next line is a summary paragraph
+                    summary_indicators = [
+                        'highly accomplished', 'experienced', 'professional', 'expertise',
+                        'years of experience', 'proven track record', 'skilled in',
+                        'knowledge of', 'background in', 'proficient', 'demonstrated'
+                    ]
+                    
+                    if len(next_line) > 100 and any(ind in next_line.lower() for ind in summary_indicators):
+                        # Found certification line + summary pattern!
+                        summary_lines = [next_line]
+                        
+                        # Collect continuation lines
+                        j = i + 2
+                        while j < min(i + 7, len(self.lines)):
+                            cont_line = self.lines[j].strip()
+                            
+                            # Stop at section header
+                            if self._is_section_header(cont_line):
+                                break
+                            
+                            # Stop at short lines
+                            if len(cont_line) < 40:
+                                break
+                            
+                            # Continue if substantial text
+                            if cont_line and len(cont_line) > 60:
+                                summary_lines.append(cont_line)
+                            
+                            j += 1
+                        
+                        result = ' '.join(summary_lines)
+                        print(f"  ✅ Found summary after certification line: {result[:100]}...")
+                        return result
+        
+        # METHOD 2: Look for explicit summary section heading (but only in header area, first 15 lines)
+        # This avoids picking up "Professional Profile" headings in employment section
+        for i, line in enumerate(self.lines[:15]):  # Only search header area
             if any(keyword in line.lower() for keyword in summary_keywords) and len(line) < 50:
                 # Get next few lines as summary
                 summary_lines = []
@@ -242,54 +313,75 @@ class ResumeParser:
                     if self.lines[j].strip():
                         summary_lines.append(self.lines[j])
                 if summary_lines:
-                    return ' '.join(summary_lines)
+                    result = ' '.join(summary_lines)
+                    print(f"  ✅ Found summary with heading in header area: {result[:100]}...")
+                    return result
         
-        # METHOD 2: Detect implicit summary - a descriptive paragraph before experience section
-        # Find where the experience section starts
-        exp_start = None
-        exp_keywords = ['experience', 'work history', 'employment', 'professional experience', 'work experience', 'career history']
-        for i, line in enumerate(self.lines):
-            if any(kw in line.lower() for kw in exp_keywords) and len(line) < 50:
-                exp_start = i
-                break
-        
-        # Search lines after contact info but before experience section
+        # METHOD 3: Detect implicit summary - paragraph after name/contact, before first section
+        # Find contact info end
         contact_end = 0
-        for i, line in enumerate(self.lines[:20]):
+        for i, line in enumerate(self.lines[:10]):
             if self._has_contact_info(line):
                 contact_end = i + 1
         
-        # Look for summary-like paragraphs in the header area (after contact, before experience)
-        search_start = contact_end
-        search_end = exp_start if exp_start else 20
+        # Find first major section start (experience, education, skills)
+        first_section = 999
+        for i, line in enumerate(self.lines):
+            if self._is_section_header(line):
+                first_section = i
+                break
         
-        for i in range(search_start, min(search_end, len(self.lines))):
+        print(f"  🔍 Searching for implicit summary between lines {contact_end} and {first_section}")
+        
+        # Look for substantial paragraphs in header area
+        for i in range(contact_end, min(first_section, 15)):
             line = self.lines[i].strip()
             
-            # Skip section headers, very short lines, and contact info
-            if self._is_section_header(line) or len(line) < 80 or self._has_contact_info(line):
+            # Skip section headers and short lines
+            if self._is_section_header(line) or len(line) < 80:
                 continue
             
-            # Check if this looks like summary text
-            if self._looks_like_summary_text(line):
-                # Accumulate multi-line summary
+            # Skip contact info
+            if self._has_contact_info(line):
+                continue
+            
+            # Check if this looks like summary text (long, descriptive paragraph)
+            line_lower = line.lower()
+            summary_indicators = [
+                'accomplished', 'experienced', 'professional', 'expertise',
+                'years of experience', 'proven track record', 'skilled in',
+                'knowledge of', 'background in', 'certified', 'proficient',
+                'highly', 'dedicated', 'motivated', 'seeking', 'passionate'
+            ]
+            
+            if any(indicator in line_lower for indicator in summary_indicators):
+                # Found implicit summary - collect full paragraph
                 summary_lines = [line]
+                
+                # Collect continuation lines
                 j = i + 1
-                while j < min(i + 8, len(self.lines)):
+                while j < min(i + 5, first_section):
                     next_line = self.lines[j].strip()
-                    # Stop at section headers or if we hit experience/education
+                    
+                    # Stop at section header
                     if self._is_section_header(next_line):
                         break
-                    # Continue if it looks like part of the summary
-                    if next_line and len(next_line) > 40 and not self._has_contact_info(next_line):
+                    
+                    # Stop at short lines (likely heading of next section)
+                    if len(next_line) < 40:
+                        break
+                    
+                    # Continue if it's substantial text
+                    if next_line and len(next_line) > 60:
                         summary_lines.append(next_line)
+                    
                     j += 1
                 
                 result = ' '.join(summary_lines)
-                print(f"  Found potential summary: {result[:100]}...")
-                if len(result) > 100:  # Ensure it's substantial enough
-                    return result
+                print(f"  ✅ Found implicit summary (no heading): {result[:100]}...")
+                return result
         
+        print(f"  ❌ No summary found")
         return ""
     
     def _extract_experience(self):
@@ -1120,14 +1212,36 @@ class ResumeParser:
         return projects
     
     def _extract_certifications(self):
-        """Extract certifications"""
+        """Extract certifications - only actual cert names, not long paragraphs"""
         certifications = []
         cert_section = self._find_section(['certifications', 'certificates', 'licenses'])
         
         if cert_section:
             for line in cert_section:
-                if line and not self._is_section_header(line):
-                    certifications.append(line)
+                if not line or self._is_section_header(line):
+                    continue
+                
+                # CRITICAL: Skip long paragraphs (likely summary text, not certifications)
+                # Certifications are typically short: "PMP", "AWS Certified", etc.
+                # Summary paragraphs are long (>200 chars) and descriptive
+                if len(line) > 200:
+                    print(f"    ⏭️  Skipping long paragraph (likely summary, not cert): {line[:80]}...")
+                    continue
+                
+                # Skip if it looks like summary text (has summary indicators)
+                line_lower = line.lower()
+                summary_indicators = [
+                    'highly accomplished', 'experienced professional', 'proven track record',
+                    'expertise extends', 'committed to', 'years of experience',
+                    'demonstrated', 'proficient in', 'adept at'
+                ]
+                
+                if any(indicator in line_lower for indicator in summary_indicators):
+                    print(f"    ⏭️  Skipping summary-like text: {line[:80]}...")
+                    continue
+                
+                # This looks like an actual certification
+                certifications.append(line)
         
         return certifications
     
@@ -1169,19 +1283,88 @@ class ResumeParser:
         return dict(sections)
     
     def _find_section(self, keywords):
-        """Find section by keywords - with improved boundary detection"""
+        """Find section by keywords - with INTELLIGENT semantic matching"""
         section_lines = []
         in_section = False
         section_start_idx = -1
         
-        # First pass: find the section start  
+        # ENHANCEMENT: Expand keywords with common synonyms
+        expanded_keywords = list(keywords)
+        
+        # Add synonyms based on primary keyword
+        primary = keywords[0].lower()
+        
+        if 'experience' in primary or 'employment' in primary:
+            expanded_keywords.extend([
+                'professional experience', 'work experience', 'work history',
+                'employment history', 'career history', 'professional background',
+                'relevant employment history', 'professional summary'
+            ])
+        elif 'education' in primary:
+            expanded_keywords.extend([
+                'educational background', 'academic background', 'academic qualifications',
+                'qualifications', 'education background', 'academics'
+            ])
+        elif 'skills' in primary:
+            expanded_keywords.extend([
+                'technical skills', 'core competencies', 'key skills',
+                'professional skills', 'areas of expertise', 'competencies',
+                'skill set', 'expertise', 'technical competencies'
+            ])
+        elif 'summary' in primary:
+            expanded_keywords.extend([
+                'professional summary', 'career summary', 'profile',
+                'professional profile', 'career objective', 'objective',
+                'executive summary', 'career overview', 'about me'
+            ])
+        
+        print(f"  🔍 Searching for section with keywords: {keywords[0]}")
+        print(f"     Expanded to {len(expanded_keywords)} variants")
+        
+        # First pass: find the section start
         for idx, line in enumerate(self.lines):
             line_lower = line.lower().strip()
-            # EXACT match for section names to avoid false positives
-            if any(keyword == line_lower or (len(line_lower) < 30 and keyword in line_lower) for keyword in keywords):
-                in_section = True
-                section_start_idx = idx
-                print(f"  📍 Found section '{keywords[0]}' at line {idx}: '{line[:40]}'")
+            
+            # Skip very long lines (not section headers)
+            if len(line) > 100:
+                continue
+            
+            # METHOD 1: Try intelligent matching if available
+            if self.intelligent_parser and len(line) < 50:
+                try:
+                    matched = self.intelligent_parser._match_heading(
+                        line,
+                        expanded_keywords
+                    )
+                    if matched:
+                        in_section = True
+                        section_start_idx = idx
+                        print(f"  ✅ Found '{keywords[0]}' at line {idx}: '{line[:50]}' (AI match → '{matched}')")
+                        break
+                except Exception as e:
+                    print(f"  ⚠️  AI matching failed: {e}")
+            
+            # METHOD 2: Exact and partial string matching (fallback)
+            for keyword in expanded_keywords:
+                keyword_lower = keyword.lower()
+                
+                # Exact match
+                if keyword_lower == line_lower:
+                    in_section = True
+                    section_start_idx = idx
+                    print(f"  ✅ Found '{keywords[0]}' at line {idx}: '{line[:50]}' (exact match)")
+                    break
+                
+                # Partial match (for short headers)
+                if len(line_lower) < 50 and keyword_lower in line_lower:
+                    # Ensure it's not part of a larger word
+                    if re.search(rf'\b{re.escape(keyword_lower)}\b', line_lower):
+                        in_section = True
+                        section_start_idx = idx
+                        print(f"  ✅ Found '{keywords[0]}' at line {idx}: '{line[:50]}' (partial match)")
+                        break
+            
+            if in_section:
                 break
         
         if not in_section:
@@ -1196,26 +1379,63 @@ class ResumeParser:
             # Skip empty lines
             if not line:
                 continue
-                
-            # Stop at next major section header (but be more selective)
+            
+            # Stop at next major section header
             if self._is_section_header(line):
                 # Don't stop if this is just a subsection or continuation
                 line_lower = line.lower()
-                major_sections = ['experience', 'education', 'summary', 'certifications', 'projects', 'awards']
-                if any(sect in line_lower for sect in major_sections):
-                    print(f"    🛑 Stopped at next major section: '{line[:40]}'")
+                major_sections = [
+                    'experience', 'education', 'summary', 'certifications',
+                    'projects', 'awards', 'skills', 'languages'
+                ]
+                
+                # Check if this is TRULY a new major section
+                is_major_section = any(sect in line_lower for sect in major_sections)
+                
+                # CRITICAL: Don't stop at the same section type we're collecting
+                # (e.g., if collecting experience, don't stop at "Professional Experience")
+                is_same_section_type = any(kw.lower() in line_lower for kw in expanded_keywords)
+                
+                if is_major_section and not is_same_section_type:
+                    print(f"    🛑 Stopped at next section: '{line[:40]}'")
                     break
-                else:
-                    # Minor header, might be subsection - include it
-                    section_lines.append(self.lines[idx])
-                    collected_count += 1
-            else:
-                section_lines.append(self.lines[idx])
-                collected_count += 1
             
-            # Safety: don't collect more than 50 lines per section
-            if collected_count > 50:
-                print(f"    ⚠️ Hit safety limit of 50 lines")
+            # CRITICAL: For EDUCATION section, stop if we hit skill-like content
+            # Skills are often listed without a clear "SKILLS" header
+            # Pattern: Multiple short lines (certifications, tools, technologies)
+            if 'education' in primary:
+                # Check if we're hitting a cluster of short skill-like lines
+                # Education entries are typically 2-4 lines per degree
+                # Skills are many short single-line items
+                
+                # If we've collected some education and now hit many short lines, likely skills
+                if collected_count >= 2:  # Already have some education
+                    # Look ahead: are the next 3 lines also short and skill-like?
+                    short_lines_ahead = 0
+                    for look_idx in range(idx, min(idx + 3, len(self.lines))):
+                        look_line = self.lines[look_idx].strip()
+                        if look_line and len(look_line) < 50 and not self._is_section_header(look_line):
+                            # Check if it looks like a skill (tool, cert, technology)
+                            skill_indicators = [
+                                'osha', 'fiber', 'testing', 'software', 'autocad', 'excel',
+                                'cisco', 'routing', 'switch', 'configuration', 'voip',
+                                'lan', 'wan', 'troubleshooting', 'monitoring', 'cloud',
+                                'microsoft', 'office', 'word', 'outlook', 'proficient'
+                            ]
+                            if any(ind in look_line.lower() for ind in skill_indicators):
+                                short_lines_ahead += 1
+                    
+                    # If we see 2+ skill-like lines ahead, we've hit the skills section
+                    if short_lines_ahead >= 2:
+                        print(f"    🛑 Stopped at skills content (no header): '{line[:40]}'")
+                        break
+            
+            section_lines.append(self.lines[idx])
+            collected_count += 1
+            
+            # Safety: don't collect more than 100 lines per section
+            if collected_count > 100:
+                print(f"    ⚠️  Hit safety limit of 100 lines")
                 break
         
         print(f"  📋 Collected {len(section_lines)} lines for '{keywords[0]}' section")
