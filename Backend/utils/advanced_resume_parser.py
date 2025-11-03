@@ -14,6 +14,7 @@ import re
 from datetime import datetime
 from collections import defaultdict
 import os
+from functools import lru_cache
 
 # Import intelligent parser for smart section mapping
 try:
@@ -476,6 +477,9 @@ class ResumeParser:
                 
                 # DECISION LOGIC: Determine what each line contains
                 
+                # Track if we consumed the next line as role (to skip it when collecting details)
+                role_consumed_next_line = False
+                
                 # If current line has location markers (-, ,), it's likely company+location
                 has_location = any(marker in text_without_dates for marker in [' - ', ', ', ' – ', ' — '])
                 
@@ -489,6 +493,8 @@ class ResumeParser:
                     role = next_line
                     print(f"    📌 Format: Company+Location+Dates | Role on next line")
                     print(f"       Company: '{company}' | Role: '{role}'")
+                    # CRITICAL: Mark that we consumed the next line (role line)
+                    role_consumed_next_line = True
                     
                 elif has_location and has_role_keyword:
                     # Current line might have: Company+Location+Role+Dates (all in one)
@@ -540,7 +546,8 @@ class ResumeParser:
                 }
 
                 # Collect following detail bullets until next date or header
-                k = i + 1
+                # CRITICAL: If we consumed the next line as role, start from i+2, not i+1
+                k = i + 2 if role_consumed_next_line else i + 1
                 while k < len(lines):
                     # CRITICAL FIX: Only break if it's a NEW job entry (not just a detail with dates)
                     # A new job entry has dates AND looks like a role/company line (short, title case)
@@ -841,16 +848,38 @@ class ResumeParser:
             'high school', 'secondary school', 'higher secondary', 'matriculation', 'ssc', 'hsc', 'ged'
         ]
         institution_keywords = ['university', 'college', 'school', 'institute', 'academy']
-        work_terms = ['coordinator', 'manager', 'director', 'assistant', 'specialist', 'analyst']
+        
+        # Expanded work-related terms to filter out job descriptions
+        work_terms = ['coordinator', 'manager', 'director', 'assistant', 'specialist', 'analyst',
+                     'managed', 'led', 'developed', 'implemented', 'coordinated', 'facilitated',
+                     'leveraged', 'proficiently', 'spearheaded', 'collaborated', 'established',
+                     'administered', 'directed', 'oversaw', 'supervised', 'executed']
+        
+        # Action verbs that indicate work experience, not education
+        work_action_verbs = ['managed', 'led', 'developed', 'implemented', 'coordinated', 
+                            'facilitated', 'leveraged', 'proficiently', 'spearheaded',
+                            'engaged', 'directed', 'formulated', 'collaborated', 'configured',
+                            'designed', 'created', 'built', 'established', 'conducted']
 
         for idx, raw in enumerate(self.lines):
             line = self._normalize_text(raw)
             if not line or len(line) < 5 or self._is_section_header(line):
                 continue
             low = line.lower()
+            
+            # CRITICAL: Skip lines that start with work action verbs (job descriptions)
+            # These are NOT education entries!
+            if any(low.startswith(verb) for verb in work_action_verbs):
+                continue
+            
             # Skip obvious work lines
             if any(w in low for w in work_terms) and not any(k in low for k in institution_keywords + degree_keywords):
                 continue
+            
+            # Skip long descriptive lines (likely job descriptions, not education)
+            if len(line) > 150 and not any(k in low for k in degree_keywords):
+                continue
+                
             if any(k in low for k in degree_keywords + institution_keywords):
                 degree, institution = self._parse_degree_institution_line(line)
                 year = self._clean_years(line)
@@ -1298,7 +1327,8 @@ class ResumeParser:
             expanded_keywords.extend([
                 'professional experience', 'work experience', 'work history',
                 'employment history', 'career history', 'professional background',
-                'relevant employment history', 'professional summary'
+                'relevant employment history'
+                # NOTE: Removed 'professional summary' - it's a summary section, not experience!
             ])
         elif 'education' in primary:
             expanded_keywords.extend([
@@ -1386,7 +1416,7 @@ class ResumeParser:
                 line_lower = line.lower()
                 major_sections = [
                     'experience', 'education', 'summary', 'certifications',
-                    'projects', 'awards', 'skills', 'languages'
+                    'projects', 'awards', 'skills', 'languages', 'profile'
                 ]
                 
                 # Check if this is TRULY a new major section
@@ -1395,6 +1425,12 @@ class ResumeParser:
                 # CRITICAL: Don't stop at the same section type we're collecting
                 # (e.g., if collecting experience, don't stop at "Professional Experience")
                 is_same_section_type = any(kw.lower() in line_lower for kw in expanded_keywords)
+                
+                # SPECIAL CASE: If collecting certifications and hit "Professional Profile", STOP
+                # "Professional Profile" is employment history, not certifications
+                if 'certifications' in primary and 'profile' in line_lower:
+                    print(f"    🛑 Stopped at next section: '{line[:40]}'")
+                    break
                 
                 if is_major_section and not is_same_section_type:
                     print(f"    🛑 Stopped at next section: '{line[:40]}'")

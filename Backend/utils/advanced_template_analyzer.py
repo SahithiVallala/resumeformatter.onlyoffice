@@ -417,9 +417,13 @@ class TemplateAnalyzer:
         sections = []
         
         section_keywords = [
-            'experience', 'education', 'skills', 'summary', 'objective',
-            'projects', 'certifications', 'awards', 'achievements',
-            'work history', 'employment', 'qualifications', 'profile'
+            'experience', 'employment', 'work history', 'professional background',
+            'education', 'academic', 'degrees',
+            'skills', 'competencies', 'technical', 'expertise',
+            'summary', 'profile', 'objective', 'about',
+            'projects', 'portfolio',
+            'certifications', 'certificates', 'licenses',
+            'awards', 'achievements', 'honors', 'qualifications'
         ]
         
         for word in words:
@@ -440,18 +444,26 @@ class TemplateAnalyzer:
         sections = []
         
         section_keywords = [
-            'experience', 'education', 'skills', 'summary', 'objective',
-            'projects', 'certifications', 'awards', 'achievements'
+            'experience', 'employment', 'work history', 'professional background',
+            'education', 'academic', 'degrees',
+            'skills', 'competencies', 'technical', 'expertise',
+            'summary', 'profile', 'objective', 'about',
+            'projects', 'portfolio',
+            'certifications', 'certificates', 'licenses',
+            'awards', 'achievements', 'honors'
         ]
         
         for para in paragraphs_data:
             text_lower = para['text'].lower()
+            # Check if paragraph contains any section keyword
             if any(keyword in text_lower for keyword in section_keywords):
-                sections.append({
-                    'heading': para['text'],
-                    'index': para['index'],
-                    'style': para['style']
-                })
+                # Also check if it looks like a heading (short text, possibly bold)
+                if len(para['text']) < 100:  # Headings are usually short
+                    sections.append({
+                        'heading': para['text'],
+                        'index': para['index'],
+                        'style': para['style']
+                    })
         
         return sections
     

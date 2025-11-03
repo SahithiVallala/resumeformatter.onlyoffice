@@ -6,10 +6,19 @@ import DownloadPhase from './components/DownloadPhase';
 import './App.css';
 
 function App() {
-  const [currentStep, setCurrentStep] = useState(1);
+  const [currentStep, setCurrentStep] = useState(() => {
+    const saved = localStorage.getItem('currentStep');
+    return saved ? parseInt(saved) : 1;
+  });
   const [templates, setTemplates] = useState([]);
-  const [selectedTemplate, setSelectedTemplate] = useState(null);
-  const [results, setResults] = useState([]);
+  const [selectedTemplate, setSelectedTemplate] = useState(() => {
+    const saved = localStorage.getItem('selectedTemplate');
+    return saved ? saved : null;
+  });
+  const [results, setResults] = useState(() => {
+    const saved = localStorage.getItem('results');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [isFormatting, setIsFormatting] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
 
@@ -20,6 +29,47 @@ function App() {
       setDarkMode(JSON.parse(savedDarkMode));
     }
   }, []);
+
+  // Save state to localStorage
+  useEffect(() => {
+    localStorage.setItem('currentStep', currentStep.toString());
+  }, [currentStep]);
+
+  useEffect(() => {
+    if (selectedTemplate) {
+      localStorage.setItem('selectedTemplate', selectedTemplate);
+    }
+  }, [selectedTemplate]);
+
+  useEffect(() => {
+    if (results.length > 0) {
+      localStorage.setItem('results', JSON.stringify(results));
+    }
+  }, [results]);
+
+  // Handle browser back/forward navigation
+  useEffect(() => {
+    const handlePopState = (event) => {
+      if (event.state && event.state.step) {
+        setCurrentStep(event.state.step);
+      }
+    };
+
+    // Push initial state
+    window.history.replaceState({ step: currentStep }, '', window.location.href);
+
+    // Listen for back/forward
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  // Update history when step changes
+  useEffect(() => {
+    window.history.pushState({ step: currentStep }, '', window.location.href);
+  }, [currentStep]);
 
   // Toggle dark mode
   const toggleDarkMode = () => {
@@ -80,6 +130,10 @@ function App() {
     setCurrentStep(1);
     setSelectedTemplate(null);
     setResults([]);
+    // Clear localStorage
+    localStorage.removeItem('currentStep');
+    localStorage.removeItem('selectedTemplate');
+    localStorage.removeItem('results');
   };
 
   const steps = [
@@ -89,24 +143,51 @@ function App() {
   ];
 
   return (
-    <div className={`App ${darkMode ? 'dark-mode' : ''}`}>
-      <header className="header">
-        <div className="header-content">
-          <div className="logo">
-            <span className="logo-icon">✨</span>
-            <h1>Resume Formatter Pro</h1>
+    <div className={`App ${darkMode ? 'dark-mode' : ''} ${currentStep === 3 ? 'fullscreen-mode' : ''}`}>
+      {currentStep !== 3 && (
+        <header className="header">
+          <div className="header-content">
+            <div className="logo">
+              <span className="logo-icon">✨</span>
+              <h1>Resume Formatter Pro</h1>
+            </div>
+            <div className="header-actions">
+              <p className="tagline">Transform Your Resumes with Professional Templates</p>
+              <button className="dark-mode-toggle" onClick={toggleDarkMode} title={darkMode ? 'Light Mode' : 'Dark Mode'}>
+                {darkMode ? '☀️' : '🌙'}
+              </button>
+            </div>
           </div>
-          <div className="header-actions">
-            <p className="tagline">Transform Your Resumes with Professional Templates</p>
-            <button className="dark-mode-toggle" onClick={toggleDarkMode} title={darkMode ? 'Light Mode' : 'Dark Mode'}>
-              {darkMode ? '☀️' : '🌙'}
-            </button>
-          </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       <div className="main-container">
-        <WizardStepper steps={steps} currentStep={currentStep} />
+        {/* Navigation Arrows */}
+        <div className="step-navigation">
+          <button 
+            className="nav-arrow nav-arrow-left"
+            onClick={() => setCurrentStep(Math.max(1, currentStep - 1))}
+            disabled={currentStep === 1}
+            title="Previous Step"
+          >
+            <span className="arrow-icon">←</span>
+            <span className="arrow-label">Back</span>
+          </button>
+          
+          {currentStep !== 3 && (
+            <WizardStepper steps={steps} currentStep={currentStep} />
+          )}
+          
+          <button 
+            className="nav-arrow nav-arrow-right"
+            onClick={() => setCurrentStep(Math.min(3, currentStep + 1))}
+            disabled={currentStep === 3 || (currentStep === 1 && !selectedTemplate) || (currentStep === 2 && results.length === 0)}
+            title="Next Step"
+          >
+            <span className="arrow-label">Next</span>
+            <span className="arrow-icon">→</span>
+          </button>
+        </div>
 
         <div className="wizard-content">
           {currentStep === 1 && (
@@ -135,14 +216,18 @@ function App() {
             <DownloadPhase
               results={results}
               onStartOver={handleStartOver}
+              darkMode={darkMode}
+              toggleDarkMode={toggleDarkMode}
             />
           )}
         </div>
       </div>
 
-      <footer className="footer">
-        <p>© 2025 Resume Formatter Pro • Powered by AI</p>
-      </footer>
+      {currentStep !== 3 && (
+        <footer className="footer">
+          <p>© 2025 Resume Formatter Pro • Powered by AI</p>
+        </footer>
+      )}
     </div>
   );
 }

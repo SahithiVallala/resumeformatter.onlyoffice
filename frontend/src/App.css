@@ -23,6 +23,24 @@ body {
   transition: all 0.3s ease;
 }
 
+/* Fullscreen mode for download phase */
+.App.fullscreen-mode {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.App.fullscreen-mode .main-container {
+  height: 100vh;
+  padding: 0;
+  margin: 0;
+}
+
+.App.fullscreen-mode .wizard-content {
+  height: 100vh;
+  padding: 0;
+  margin: 0;
+}
+
 /* Global Dark Mode */
 .App.dark-mode {
   background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%);
@@ -141,6 +159,61 @@ body {
   width: 100%;
   margin: 0 auto;
   padding: 2rem 1.5rem;
+}
+
+/* Navigation Arrows */
+.step-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 2rem;
+}
+
+.nav-arrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.nav-arrow:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
+}
+
+.nav-arrow:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: #94a3b8;
+}
+
+.arrow-icon {
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.arrow-label {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.App.dark-mode .nav-arrow {
+  background: linear-gradient(135deg, #a78bfa 0%, #ec4899 100%);
+}
+
+.App.dark-mode .nav-arrow:disabled {
+  background: #475569;
 }
 
 .wizard-content {

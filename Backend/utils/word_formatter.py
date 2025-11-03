@@ -5209,10 +5209,18 @@ class WordFormatter:
             return f"{min(total_career_years, 5)} years"
     
     def _find_matching_resume_section(self, section_key, resume_sections):
-        """Find matching resume section with synonyms"""
+        """Find matching resume section with synonyms - always returns a list"""
         # Direct match
         if section_key in resume_sections:
-            return resume_sections[section_key]
+            content = resume_sections[section_key]
+            # CRITICAL: Ensure we return a list, not a string
+            if isinstance(content, str):
+                # Split string into lines
+                return [line.strip() for line in content.split('\n') if line.strip()]
+            elif isinstance(content, list):
+                return content
+            else:
+                return []
 
         synonyms = {
             'experience': ['experience', 'employment', 'work', 'professional', 'career', 'history', 'background'],
@@ -5231,7 +5239,13 @@ class WordFormatter:
         for resume_key, content in resume_sections.items():
             key_lower = resume_key.lower()
             if any(p in key_lower for p in patterns):
-                return content
+                # CRITICAL: Ensure we return a list, not a string
+                if isinstance(content, str):
+                    return [line.strip() for line in content.split('\n') if line.strip()]
+                elif isinstance(content, list):
+                    return content
+                else:
+                    return []
 
         return []
     

@@ -10,13 +10,35 @@ from config import Config
 from models.database import TemplateDB
 from utils.advanced_template_analyzer import analyze_template
 from utils.advanced_resume_parser import parse_resume
-from utils.intelligent_formatter import format_resume_intelligent
+
+# Import OnlyOffice routes
+from routes.onlyoffice_routes import onlyoffice_bp
+
+# Try to import enhanced formatter, fallback to standard if not available
+try:
+    from utils.enhanced_formatter_integration import format_resume_intelligent
+    print("✅ Enhanced intelligent formatter loaded")
+except ImportError:
+    from utils.intelligent_formatter import format_resume_intelligent
+    print("⚠️  Using standard formatter (enhanced version not available)")
 
 app = Flask(__name__)
 app.config.from_object(Config)
 Config.init_app(app)
 
-# Enable CORS for React frontend (allow multiple localhost ports)
+# Enable CORS for React frontend and OnlyOffice Document Server
+# CRITICAL: Must allow Docker container IPs for OnlyOffice callbacks
+import socket
+
+# Get local IP for CORS
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    local_ip = s.getsockname()[0]
+    s.close()
+except:
+    local_ip = "192.168.0.104"
+
 CORS(
     app,
     resources={r"/api/*": {
@@ -24,10 +46,24 @@ CORS(
             "http://localhost:3000",
             "http://localhost:3001",
             "http://127.0.0.1:3000",
-            "http://127.0.0.1:3001"
+            "http://127.0.0.1:3001",
+            "http://localhost:8080",  # OnlyOffice Document Server
+            "http://host.docker.internal",  # Docker Desktop
+            "http://host.docker.internal:5000",
+            f"http://{local_ip}",  # Local network IP
+            f"http://{local_ip}:5000",
+            f"http://{local_ip}:3000",
+            "http://192.168.65.254",  # Docker internal gateway
+            "*"  # Allow all for OnlyOffice (it uses various IPs)
         ]
-    }}
+    }},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 )
+
+# Register OnlyOffice blueprint
+app.register_blueprint(onlyoffice_bp)
 
 db = TemplateDB()
 
@@ -162,9 +198,16 @@ def format_resumes():
         print(f"📊 Resumes to Process: {len(files)}")
         print(f"{'='*70}\n")
         
-        for idx, file in enumerate(files, 1):
+        # Use ThreadPoolExecutor for parallel processing
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+        
+        start_time = time.time()
+        
+        def process_single_resume(file, idx, total):
+            """Process a single resume file"""
             if file.filename == '' or not allowed_file(file.filename):
-                continue
+                return None
             
             # Save resume
             filename = secure_filename(file.filename)
@@ -175,11 +218,14 @@ def format_resumes():
             file.save(file_path)
             
             print(f"\n{'─'*70}")
-            print(f"📄 Processing Resume {idx}/{len(files)}: {filename}")
+            print(f"📄 Processing Resume {idx}/{total}: {filename}")
             print(f"{'─'*70}")
             
-            # Parse resume with advanced parser
+            # Parse resume with advanced parser (with timing)
+            parse_start = time.time()
             resume_data = parse_resume(file_path, file_type)
+            parse_time = time.time() - parse_start
+            print(f"  ⏱️  Parsing took: {parse_time:.2f}s")
             
             # Add CAI contact data from request if provided
             if 'cai_contact' in request.form:
@@ -194,34 +240,31 @@ def format_resumes():
             
             if resume_data:
                 # Format resume with intelligent formatter
-                # Create DOCX only (no PDF conversion for speed)
+                # Create DOCX only (NO PDF for speed!)
                 docx_filename = f"formatted_{resume_id}.docx"
                 docx_path = os.path.join(Config.OUTPUT_FOLDER, docx_filename)
                 
+                format_start = time.time()
                 if format_resume_intelligent(resume_data, template_analysis, docx_path):
+                    format_time = time.time() - format_start
+                    print(f"  ⏱️  Formatting took: {format_time:.2f}s")
                     # Check if DOCX was created
                     if os.path.exists(docx_path):
-                        # Convert DOCX to PDF for preview
-                        pdf_filename = docx_filename.replace('.docx', '.pdf')
-                        pdf_path = os.path.join(Config.OUTPUT_FOLDER, pdf_filename)
-                        
-                        try:
-                            print(f"📄 Converting to PDF for preview...")
-                            from docx2pdf import convert
-                            convert(docx_path, pdf_path)
-                            print(f"✅ PDF preview created: {pdf_filename}")
-                        except Exception as e:
-                            print(f"⚠️  PDF conversion failed: {e}")
-                            # Continue anyway - DOCX is still available
-                        
-                        # Return DOCX filename for download, PDF for preview
-                        formatted_files.append({
+                        # NO PDF CONVERSION FOR SPEED!
+                        result = {
                             'filename': docx_filename,
                             'original': filename,
-                            'name': resume_data['name'],
-                            'pdf': pdf_filename if os.path.exists(pdf_path) else None
-                        })
+                            'name': resume_data['name']
+                        }
                         print(f"✅ Successfully formatted: {filename} → {docx_filename}\n")
+                        
+                        # Cleanup
+                        try:
+                            os.remove(file_path)
+                        except:
+                            pass
+                        
+                        return result
                     else:
                         print(f"⚠️  Formatting completed but output file not found\n")
                 else:
@@ -229,14 +272,34 @@ def format_resumes():
             else:
                 print(f"❌ Failed to parse resume: {filename}\n")
             
-            # Cleanup
+            # Cleanup on failure
             try:
                 os.remove(file_path)
             except:
                 pass
+            
+            return None
         
+        # Process all resumes in parallel for speed
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        with ThreadPoolExecutor(max_workers=min(4, len(files))) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(process_single_resume, file, idx, len(files)): file 
+                for idx, file in enumerate(files, 1)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_file):
+                result = future.result()
+                if result:
+                    formatted_files.append(result)
+        
+        elapsed_time = time.time() - start_time
         print(f"{'='*70}")
         print(f"✅ FORMATTING COMPLETE: {len(formatted_files)}/{len(files)} successful")
+        print(f"⏱️  Total Time: {elapsed_time:.2f} seconds ({elapsed_time/len(files):.2f}s per resume)")
         print(f"{'='*70}\n")
         
         return jsonify({
@@ -431,11 +494,61 @@ def delete_template(template_id):
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
+@app.route('/api/onlyoffice/status', methods=['GET'])
+def onlyoffice_status():
+    """Check OnlyOffice Document Server status"""
+    try:
+        import requests
+        response = requests.get('http://localhost:8080/healthcheck', timeout=2)
+        if response.status_code == 200:
+            return jsonify({
+                'success': True,
+                'status': 'running',
+                'message': 'OnlyOffice Document Server is running'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'status': 'error',
+                'message': f'OnlyOffice returned status code {response.status_code}'
+            })
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            'success': False,
+            'status': 'offline',
+            'message': 'OnlyOffice Document Server is not running. Start it with: docker start onlyoffice-documentserver'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'status': 'error',
+            'message': str(e)
+        })
+
 if __name__ == '__main__':
+    import socket
+    
+    # Get local IP for display
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except:
+        local_ip = "localhost"
+    
     print("\n" + "="*70)
     print("🎯 RESUME FORMATTER - BACKEND SERVER")
     print("="*70)
     print("✅ API running on http://127.0.0.1:5000")
+    print(f"✅ Network access: http://{local_ip}:5000")
     print("✅ React frontend: http://localhost:3000")
+    print("✅ OnlyOffice Document Server: http://localhost:8080")
+    print("="*70)
+    print("📝 OnlyOffice Editor Routes:")
+    print("   • /api/onlyoffice/config/<filename>")
+    print("   • /api/onlyoffice/download/<filename>")
+    print("   • /api/onlyoffice/callback/<filename>")
     print("="*70 + "\n")
-    app.run(debug=True, port=5000)
+    # CRITICAL: Bind to 0.0.0.0 to accept connections from Docker
+    app.run(debug=True, host='0.0.0.0', port=5000)
